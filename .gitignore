@@ -1,0 +1,26 @@
+# Ignore specific files
+/code.txt
+jay.jpg
+jay_REDACTED.jpg
+wrapper_2.py
+create_corporate_pdf.py
+
+# Ignore all JSON files ONLY in root directory
+/*.json
+
+# Ignore all PDF files (anywhere)
+*.pdf
+
+# Ignore folders
+/json/
+pdfs/
+presidio-env/
+output/
+
+# Optional: Python-related ignores (recommended)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
