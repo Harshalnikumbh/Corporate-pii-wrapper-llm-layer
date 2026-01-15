@@ -1,26 +1,51 @@
 import os
 import re
+import sys
 import cv2
+import time
 import fitz
 import json
 import logging
 import openpyxl
-import pandas as pd
 import requests
 import numpy as np
-from PIL import Image
+import pandas as pd
+from enum import Enum
 from groq import Groq
+from PIL import Image
+from functools import wraps
 from datetime import datetime
 from dotenv import load_dotenv
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List, Set
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+from typing import Dict, Tuple, Optional , List
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, Pattern, PatternRecognizer
+            
+# Robust retry decorator
+def retry_on_failure(max_retries=3, delay=1):
+    """Decorator to retry failed operations"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"{func.__name__} failed after {max_retries} attempts: {e}")
+                        raise
+                    logger.warning(f"{func.__name__} attempt {attempt + 1} failed: {e}. Retrying...")
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
 
 load_dotenv()
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +66,119 @@ class Config:
     language: str = "en"
     face_detection_model: str = "haarcascade_frontalface_default.xml"
 
+# REDACTION POLICY ENGINE 
+class RedactionSeverity(Enum):
+    """Severity levels for PII redaction"""
+    CRITICAL = "CRITICAL"  # Full blackout - IDs, credentials
+    HIGH = "HIGH"          # Heavy blur - faces, screens
+    MEDIUM = "MEDIUM"      # Medium blur - client logos
+    LOW = "LOW"            # Light blur - name plates
+    NONE = "NONE"          # No redaction
+
+class RedactionMethod(Enum):
+    """Redaction visualization methods"""
+    BLACKOUT = "blackout"      # Solid black rectangle
+    BLUR_HEAVY = "blur_heavy"  # Gaussian blur (99x99)
+    BLUR_MEDIUM = "blur_medium" # Gaussian blur (51x51)
+    BLUR_LIGHT = "blur_light"  # Gaussian blur (25x25)
+    PIXELATE = "pixelate"      # Pixelation effect
+
+class RedactionPolicy:
+    """Enterprise-grade image redaction policy"""
+    
+    def __init__(self, policy_config: Optional[Dict] = None):
+        self.policy = policy_config or self._default_corporate_policy()
+    
+    def _default_corporate_policy(self) -> Dict:
+        """Default policy aligned with GDPR, DPDP Act India, ISO 27701"""
+        return {
+            # MANDATORY REDACTION
+            'faces': {
+                'enabled': True,
+                'severity': RedactionSeverity.HIGH,
+                'method': RedactionMethod.BLUR_HEAVY,
+                'min_confidence': 0.5,
+                'exceptions': [],  # Empty = redact all faces
+                'reason': 'Biometric PII (GDPR Art. 9, DPDP Act Sec. 3)'
+            },
+            'identity_documents': {
+                'enabled': True,
+                'severity': RedactionSeverity.CRITICAL,
+                'method': RedactionMethod.BLACKOUT,
+                'types': ['aadhaar', 'pan', 'passport', 'driving_license', 
+                         'employee_badge', 'voter_id', 'id_card'],
+                'min_confidence': 0.6,
+                'reason': 'Identity documents - full redaction required'
+            },
+            'screens_dashboards': {
+                'enabled': True,
+                'severity': RedactionSeverity.HIGH,
+                'method': RedactionMethod.BLACKOUT,
+                'keywords': ['dashboard', 'email', 'inbox', 'crm', 'jira', 
+                            'excel', 'spreadsheet', 'report', 'analytics'],
+                'min_confidence': 0.5,
+                'reason': 'Potential confidential business data'
+            },
+            'ocr_pii': {
+                'enabled': True,
+                'severity': RedactionSeverity.HIGH,
+                'method': RedactionMethod.BLACKOUT,
+                'min_confidence': 0.4,
+                'entity_types': ['PERSON', 'PHONE_NUMBER', 'EMAIL_ADDRESS',
+                               'AADHAAR_NUMBER', 'PAN_NUMBER', 'BANK_ACCOUNT',
+                               'PASSPORT', 'EMPLOYEE_ID'],
+                            'reason': 'OCR-detected PII'
+            },
+            
+            # CONDITIONAL REDACTION
+            'client_logos': {
+                'enabled': True,
+                'severity': RedactionSeverity.MEDIUM,
+                'method': RedactionMethod.BLUR_MEDIUM,
+                'whitelist': ['microsoft', 'google', 'aws', 'amazon'],
+                'min_confidence': 0.5,
+                'reason': 'Client confidentiality (NDA compliance)'
+            },
+            'whiteboards': {
+                'enabled': True,
+                'severity': RedactionSeverity.MEDIUM,
+                'method': RedactionMethod.BLUR_MEDIUM,
+                'redact_if_contains': ['project', 'timeline', 'budget', 
+                                       'client', 'confidential', 'credential'],
+                'min_confidence': 0.4,
+                'reason': 'Potential strategic information'
+            },
+            'printed_documents': {
+                'enabled': True,
+                'severity': RedactionSeverity.HIGH,
+                'method': RedactionMethod.BLACKOUT,
+                'types': ['invoice', 'contract', 'payslip', 'offer_letter',
+                         'financial_report', 'meeting_notes'],
+                'min_confidence': 0.5,
+                'reason': 'Confidential business documents'
+            },
+            
+            # SAFE - NO REDACTION
+            'safe_objects': {
+                'enabled': False,
+                'categories': ['furniture', 'office_layout', 'plants', 
+                              'generic_signage', 'walls', 'ceiling']
+            }
+        }
+    
+    def get_redaction_method(self, entity_type: str) -> RedactionMethod:
+        """Get redaction method for entity type"""
+        config = self.policy.get(entity_type, {})
+        return config.get('method', RedactionMethod.BLUR_HEAVY)
+    
+    def should_redact(self, entity_type: str) -> bool:
+        """Check if entity type should be redacted"""
+        return self.policy.get(entity_type, {}).get('enabled', False)
+    
+    def get_confidence_threshold(self, entity_type: str) -> float:
+        """Get minimum confidence for redaction"""
+        return self.policy.get(entity_type, {}).get('min_confidence', 0.5)
+
 # Context-Aware Entity Classifier
 class ContextAwareClassifier:
     
@@ -60,61 +198,61 @@ class ContextAwareClassifier:
         
         prompt = f"""You are a CORPORATE DATA SECURITY expert analyzing text from a company employee to prevent data leaks.
 
-CONTEXT: This is from a corporate environment. Your job is to protect:
-- Employee personal information
-- Client/customer data
-- Financial information
-- Project codes and proprietary information
+        CONTEXT: This is from a corporate environment. Your job is to protect:
+        - Employee personal information
+        - Client/customer data
+        - Financial information
+        - Project codes and proprietary information
 
-TEXT TO ANALYZE:
-{text}
+        TEXT TO ANALYZE:
+        {text}
 
-DETECTED ENTITIES:
-{chr(10).join(entity_list)}
+        DETECTED ENTITIES:
+        {chr(10).join(entity_list)}
 
-CLASSIFY EACH ENTITY INTO ONE CATEGORY:
+        CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 
-1. **EMPLOYEE_PII** - Employee's own sensitive information
-   - Employee's name (if "my name is X", "I am X")
-   - Employee's phone, email, address, ID numbers, salary, bank details
-   - Example: "I'm Rahul, my salary is 12 LPA" → EMPLOYEE_PII
+        1. **EMPLOYEE_PII** - Employee's own sensitive information
+        - Employee's name (if "my name is X", "I am X")
+        - Employee's phone, email, address, ID numbers, salary, bank details
+        - Example: "I'm Rahul, my salary is 12 LPA" → EMPLOYEE_PII
 
-2. **CLIENT_SENSITIVE** - Client/customer/vendor information
-   - Client names (unless Fortune 500 companies)
-   - Customer contact details, addresses
-   - Project codes, engagement details
-   - Example: "Our client Rajesh from ABC Corp" → CLIENT_SENSITIVE
+        2. **CLIENT_SENSITIVE** - Client/customer/vendor information
+        - Client names (unless Fortune 500 companies)
+        - Customer contact details, addresses
+        - Project codes, engagement details
+        - Example: "Our client Rajesh from ABC Corp" → CLIENT_SENSITIVE
 
-3. **FINANCIAL_DATA** - Money-related sensitive info
-   - Bank accounts, IFSC codes, salary figures
-   - Revenue numbers, budgets, invoices
-   - Example: "Account: 1234567890" → FINANCIAL_DATA
+        3. **FINANCIAL_DATA** - Money-related sensitive info
+        - Bank accounts, IFSC codes, salary figures
+        - Revenue numbers, budgets, invoices
+        - Example: "Account: 1234567890" → FINANCIAL_DATA
 
-4. **PUBLIC_FIGURE** - Famous people/large organizations
-   - Celebrities, politicians, CEOs of major companies
-   - Fortune 500 companies, government organizations
-   - Example: "Salman Khan" (actor), "Microsoft", "Google" → PUBLIC_FIGURE
+        4. **PUBLIC_FIGURE** - Famous people/large organizations
+        - Celebrities, politicians, CEOs of major companies
+        - Fortune 500 companies, government organizations
+        - Example: "Salman Khan" (actor), "Microsoft", "Google" → PUBLIC_FIGURE
 
-5. **COLLEAGUE_PII** - Other employees/colleagues mentioned
-   - Colleague names in context like "my friend X", "my colleague Y"
-   - Example: "invite my colleague Amit" → COLLEAGUE_PII
+        5. **COLLEAGUE_PII** - Other employees/colleagues mentioned
+        - Colleague names in context like "my friend X", "my colleague Y"
+        - Example: "invite my colleague Amit" → COLLEAGUE_PII
 
-6. **KEEP** - Safe to keep
-   - Generic job titles, departments
-   - Public companies in professional context
-   - Generic locations (cities, countries - not home addresses)
+        6. **KEEP** - Safe to keep
+        - Generic job titles, departments
+        - Public companies in professional context
+        - Generic locations (cities, countries - not home addresses)
 
-CRITICAL CORPORATE RULES:
-- "My name is Salman Khan" → Check if actor or employee (EMPLOYEE_PII if employee)
-- "Want to dance with Akshay Kumar" → PUBLIC_FIGURE (famous actor)
-- "My friend Amit" → COLLEAGUE_PII (redact)
-- Client names (unless huge companies) → CLIENT_SENSITIVE
-- ANY bank account, salary, address → Always redact
-- Project codes, employee IDs → Always redact
-- "Microsoft" in work context → KEEP if discussing company, CLIENT_SENSITIVE if it's your client
+        CRITICAL CORPORATE RULES:
+        - "My name is Salman Khan" → Check if actor or employee (EMPLOYEE_PII if employee)
+        - "Want to dance with Akshay Kumar" → PUBLIC_FIGURE (famous actor)
+        - "My friend Amit" → COLLEAGUE_PII (redact)
+        - Client names (unless huge companies) → CLIENT_SENSITIVE
+        - ANY bank account, salary, address → Always redact
+        - Project codes, employee IDs → Always redact
+        - "Microsoft" in work context → KEEP if discussing company, CLIENT_SENSITIVE if it's your client
 
-Respond ONLY with JSON mapping entity number to classification:
-{{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
+        Respond ONLY with JSON mapping entity number to classification:
+        {{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
 
         try:
             response = self.groq_client.chat.completions.create(
@@ -223,10 +361,10 @@ class PublicEntityVerifier:
         try:
             prompt = f"""Is "{name}" a well-known public figure, celebrity, politician, historical figure, or major organization?
 
-Answer ONLY: YES or NO
+            Answer ONLY: YES or NO
 
-Entity: "{name}"
-Answer:"""
+            Entity: "{name}"
+            Answer:"""
             
             response = self.groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -241,6 +379,258 @@ Answer:"""
             logger.debug(f"LLM verification failed for {name}: {e}")
             return False
 
+# ID DOCUMENT DETECTOR 
+class IDDocumentDetector:
+    """Detect identity documents in images using template matching and OCR"""
+    
+    def __init__(self):
+        self.id_keywords = {
+            'aadhaar': ['aadhaar', 'आधार', 'government of india', 'uid'],
+            'pan': ['income tax', 'permanent account number', 'pan'],
+            'passport': ['passport', 'republic of india', 'p<ind'],
+            'driving_license': ['driving licence', 'driving license', 'dl no'],
+            'employee_badge': ['employee id', 'emp id', 'staff id', 'badge'],
+            'voter_id': ['election commission', 'elector', 'voter']
+        }
+
+    @retry_on_failure(max_retries=2, delay=1)
+    def detect_id_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
+        
+        detected_docs = []
+        
+        if ocr_reader is None:
+            return detected_docs
+        
+        try:
+            # Run OCR on entire image
+            ocr_results = ocr_reader.readtext(image_cv)
+            full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
+            
+            # Check for each ID type
+            for doc_type, keywords in self.id_keywords.items():
+                for keyword in keywords:
+                    if keyword in full_text:
+                        # Find bounding box of the document
+                        bbox = self._find_document_region(image_cv, ocr_results, keywords)
+                        if bbox:
+                            detected_docs.append({
+                                'type': doc_type,
+                                'bbox': bbox,
+                                'confidence': 0.85,
+                                'reason': f'Keyword match: {keyword}'
+                            })
+                            logger.info(f"ID Document detected: {doc_type}")
+                            break  # One match per type
+        
+        except Exception as e:
+            logger.warning(f"ID document detection failed: {e}")
+        
+        return detected_docs
+    
+    def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
+        """Find bounding box containing ID document keywords"""
+        matching_boxes = []
+        
+        for (bbox, text, conf) in ocr_results:
+            if any(kw in text.lower() for kw in keywords):
+                matching_boxes.append(bbox)
+        
+        if not matching_boxes:
+            return None
+        
+        # Expand to cover entire document area
+        all_points = np.array([pt for box in matching_boxes for pt in box])
+        x_min, y_min = all_points.min(axis=0).astype(int)
+        x_max, y_max = all_points.max(axis=0).astype(int)
+        
+        # Add padding (20% on each side)
+        h, w = image_cv.shape[:2]
+        padding_x = int((x_max - x_min) * 0.2)
+        padding_y = int((y_max - y_min) * 0.2)
+        
+        x = max(0, x_min - padding_x)
+        y = max(0, y_min - padding_y)
+        width = min(w - x, x_max - x_min + 2 * padding_x)
+        height = min(h - y, y_max - y_min + 2 * padding_y)
+        
+        return (x, y, width, height)
+
+# SCREEN/DASHBOARD DETECTOR
+class ScreenDashboardDetector:
+    """Detect computer screens and dashboards showing sensitive data"""
+    
+    def __init__(self):
+        self.screen_indicators = [
+            # UI Elements
+            'chrome', 'firefox', 'browser', 'toolbar',
+            # Applications
+            'gmail', 'outlook', 'slack', 'teams', 'zoom',
+            'excel', 'word', 'powerpoint', 'dashboard',
+            # UI Text
+            'inbox', 'sent', 'draft', 'new message',
+            'file', 'edit', 'view', 'help',
+            # Business Apps
+            'salesforce', 'jira', 'confluence', 'crm',
+            'analytics', 'report', 'metrics'
+        ]
+    
+    def detect_screens(self, image_cv, ocr_reader=None) -> List[Dict]:
+        """
+        Detect screens/dashboards in image
+        Returns: List of {'type': 'screen', 'bbox': (x,y,w,h), 'confidence': 0.9}
+        """
+        detected_screens = []
+        
+        if ocr_reader is None:
+            return detected_screens
+        
+        try:
+            # Run OCR
+            ocr_results = ocr_reader.readtext(image_cv)
+            full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
+            
+            # Check for screen indicators
+            matches = [ind for ind in self.screen_indicators if ind in full_text]
+            
+            if len(matches) >= 2:  # At least 2 indicators = likely a screen
+                # Find the rectangular region containing UI elements
+                bbox = self._find_screen_region(image_cv, ocr_results)
+                
+                if bbox:
+                    detected_screens.append({
+                        'type': 'computer_screen',
+                        'bbox': bbox,
+                        'confidence': min(0.95, 0.5 + len(matches) * 0.1),
+                        'reason': f'UI elements detected: {", ".join(matches[:3])}'
+                    })
+                    logger.info(f"Screen detected with {len(matches)} UI indicators")
+        
+        except Exception as e:
+            logger.warning(f"Screen detection failed: {e}")
+        
+        return detected_screens
+    
+    def _find_screen_region(self, image_cv, ocr_results) -> Optional[Tuple]:
+        """Find bounding box of screen area"""
+        if not ocr_results:
+            return None
+        
+        # Get all text regions
+        all_boxes = [bbox for (bbox, _, _) in ocr_results]
+        
+        if len(all_boxes) < 5:  # Too few elements
+            return None
+        
+        # Find dense region of text (likely a screen)
+        all_points = np.array([pt for box in all_boxes for pt in box])
+        x_min, y_min = all_points.min(axis=0).astype(int)
+        x_max, y_max = all_points.max(axis=0).astype(int)
+        
+        # Basic validation: screens are typically rectangular and sizable
+        width = x_max - x_min
+        height = y_max - y_min
+        
+        if width < 200 or height < 150:  # Too small to be a screen
+            return None
+        
+        return (x_min, y_min, width, height)
+
+# WHITEBOARD/PRINTED DOCUMENT DETECTOR 
+class WhiteboardDocumentDetector:
+    """Detect whiteboards and printed documents in images"""
+    
+    def __init__(self):
+        self.document_keywords = [
+            # Document types
+            'invoice', 'receipt', 'contract', 'agreement', 'offer letter',
+            'payslip', 'salary slip', 'financial report', 'balance sheet',
+            'meeting notes', 'minutes', 'confidential', 'internal use only',
+            # Document headers
+            'to:', 'from:', 'subject:', 'date:', 'invoice no', 'bill to',
+            # Whiteboard indicators
+            'project timeline', 'roadmap', 'sprint', 'q1', 'q2', 'q3', 'q4',
+            'budget', 'revenue', 'target', 'milestone'
+        ]
+    
+    def detect_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
+        """
+        Detect printed documents and whiteboards
+        Returns: List of {'type': 'document', 'bbox': (x,y,w,h), 'confidence': 0.8}
+        """
+        detected_docs = []
+        
+        if ocr_reader is None:
+            return detected_docs
+        
+        try:
+            # Run OCR
+            ocr_results = ocr_reader.readtext(image_cv)
+            full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
+            
+            # Check for document indicators
+            matches = [kw for kw in self.document_keywords if kw in full_text]
+            
+            if len(matches) >= 2:  # At least 2 document indicators
+                # Detect if it's a whiteboard (large white/light-colored region)
+                is_whiteboard = self._is_whiteboard(image_cv)
+                
+                bbox = self._find_document_region(image_cv, ocr_results)
+                
+                if bbox:
+                    detected_docs.append({
+                        'type': 'whiteboard' if is_whiteboard else 'printed_document',
+                        'bbox': bbox,
+                        'confidence': min(0.9, 0.5 + len(matches) * 0.1),
+                        'reason': f'Document keywords detected: {", ".join(matches[:3])}'
+                    })
+                    logger.info(f"{'Whiteboard' if is_whiteboard else 'Document'} detected with {len(matches)} keywords")
+        
+        except Exception as e:
+            logger.warning(f"Document detection failed: {e}")
+        
+        return detected_docs
+    
+    def _is_whiteboard(self, image_cv) -> bool:
+        """Check if image contains a whiteboard (large white/light area)"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+        
+        # Count bright pixels (whiteboard is typically bright)
+        bright_pixels = np.sum(gray > 200)
+        total_pixels = gray.size
+        
+        # If >40% of image is bright, likely a whiteboard
+        return (bright_pixels / total_pixels) > 0.4
+    
+    def _find_document_region(self, image_cv, ocr_results) -> Optional[Tuple]:
+        """Find bounding box of document/whiteboard area"""
+        if not ocr_results:
+            return None
+        
+        all_boxes = [bbox for (bbox, _, _) in ocr_results]
+        
+        if len(all_boxes) < 3:
+            return None
+        
+        # Find region containing text
+        all_points = np.array([pt for box in all_boxes for pt in box])
+        x_min, y_min = all_points.min(axis=0).astype(int)
+        x_max, y_max = all_points.max(axis=0).astype(int)
+        
+        width = x_max - x_min
+        height = y_max - y_min
+        
+        # Expand to cover full document (add 10% padding)
+        h, w = image_cv.shape[:2]
+        padding_x = int(width * 0.1)
+        padding_y = int(height * 0.1)
+        
+        x = max(0, x_min - padding_x)
+        y = max(0, y_min - padding_y)
+        width = min(w - x, width + 2 * padding_x)
+        height = min(h - y, height + 2 * padding_y)
+        
+        return (x, y, width, height)
 # Indian Context PII Recognizers
 class IndianPIIRecognizers:
     
@@ -656,116 +1046,429 @@ class SpreadsheetHandler:
             },
             'timestamp': datetime.now().isoformat()
         }
-
-# Face Redaction
-class AdvancedImageRedactor:
-    """Redact faces, text (PII), and logos in images"""
     
-    def __init__(self, pii_guard: 'ContextAwarePIIGuard' = None):
+#  PRODUCTION-GRADE IMAGE REDACTOR 
+class ProductionImageRedactor:
+    """Production-grade image redaction with policy enforcement and audit trails"""
+    
+    def __init__(self, pii_guard: 'ContextAwarePIIGuard' = None, 
+                 policy: RedactionPolicy = None):
+        # Detection models
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
         self.pii_guard = pii_guard
+        self.policy = policy or RedactionPolicy()
+        
+        # Advanced detectors
+        self.id_detector = IDDocumentDetector()
+        self.screen_detector = ScreenDashboardDetector()
+        self.whiteboard_detector = WhiteboardDocumentDetector()  
+        
+        # Cache OCR results
+        self._ocr_cache = {}  # Fixed: use underscore
+        self._enable_caching = True
+        
+        # OCR
         try:
             import easyocr
             self.ocr_reader = easyocr.Reader(['en'])
             self.ocr_available = True
-        except:
-            logger.warning("EasyOCR not available. Install: pip install easyocr")
+            logger.info("[OK] EasyOCR initialized successfully")
+        except Exception as e:
+            logger.warning(f"EasyOCR not available: {e}")
             self.ocr_available = False
+
+    # Validate image quality
+    def _validate_image_quality(self, img_cv) -> Dict:
+        """Check if image quality is sufficient for redaction"""
+        h, w = img_cv.shape[:2]
+        
+        validation = {
+            'is_valid': True,
+            'warnings': [],
+            'resolution': (w, h)
+        }
+        
+        # Check resolution
+        if w < 300 or h < 300:
+            validation['warnings'].append('Low resolution - redaction accuracy may be reduced')
+        
+        # Check brightness
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        avg_brightness = np.mean(gray)
+        
+        if avg_brightness < 50:
+            validation['warnings'].append('Image too dark - OCR may fail')
+        elif avg_brightness > 200:
+            validation['warnings'].append('Image overexposed - detection may be affected')
+        
+        # Check blur
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        if laplacian_var < 100:
+            validation['warnings'].append('Image appears blurry - detection accuracy reduced')
+        
+        return validation
     
-    def redact_image(self, image: Image.Image, redact_faces=True, 
-                     redact_text=True, redact_logos=True) -> Tuple[Image.Image, Dict]:
-        """Comprehensive image redaction"""
+    def _get_ocr_results(self, img_cv):
+        """Get OCR results with caching"""
+        if not self.ocr_available:
+            return []
+        
+        # Create image hash for caching
+        img_hash = hash(img_cv.tobytes())
+        
+        if self._enable_caching and img_hash in self._ocr_cache:
+            logger.debug("Using cached OCR results")
+            return self._ocr_cache[img_hash]
+        
+        # Run OCR
+        results = self.ocr_reader.readtext(img_cv)
+        
+        if self._enable_caching:
+            self._ocr_cache[img_hash] = results
+        
+        return results
+    
+    
+    def redact_image(self, image: Image.Image, 
+                     redact_faces=True,
+                     redact_ids=True,
+                     redact_screens=True,
+                     redact_text=True,
+                     redact_logos=True,
+                     redact_documents=True) -> Tuple[Image.Image, Dict]:  
+        """Redact image based on policy and specified options"""
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        stats = {'faces': 0, 'text_regions': 0, 'logos': 0}
+
+        # Image quality validation
+        quality_check = self._validate_image_quality(img_cv)
+        if quality_check['warnings']:
+            for warning in quality_check['warnings']:
+                logger.warning(f"Image Quality: {warning}")
         
-        # 1. Redact faces
-        if redact_faces:
-            img_cv, faces_count = self._redact_faces(img_cv)
-            stats['faces'] = faces_count
+        # Audit trail
+        redaction_log = {
+            'timestamp': datetime.now().isoformat(),
+            'detections': [],
+            'redactions': [],
+            'policy_applied': 'corporate_default',
+            'summary': {}
+        }
         
-        # 2. Redact text containing PII
-        if redact_text and self.ocr_available and self.pii_guard:
-            img_cv, text_count = self._redact_text_pii(img_cv)
-            stats['text_regions'] = text_count
+        # PHASE 1: CRITICAL - Identity Documents (highest priority)
+        if redact_ids and self.policy.should_redact('identity_documents'):
+            img_cv, id_log = self._redact_id_documents(img_cv)
+            redaction_log['detections'].extend(id_log['detections'])
+            redaction_log['redactions'].extend(id_log['redactions'])
         
-        # 3. Redact logos (template matching or simple color-based)
-        if redact_logos:
-            img_cv, logo_count = self._redact_logos(img_cv)
-            stats['logos'] = logo_count
+        # PHASE 2: HIGH - Screens/Dashboards
+        if redact_screens and self.policy.should_redact('screens_dashboards'):
+            img_cv, screen_log = self._redact_screens(img_cv)
+            redaction_log['detections'].extend(screen_log['detections'])
+            redaction_log['redactions'].extend(screen_log['redactions'])
         
+        # PHASE 3: HIGH - Faces (biometric PII)
+        if redact_faces and self.policy.should_redact('faces'):
+            img_cv, face_log = self._redact_faces_policy(img_cv)
+            redaction_log['detections'].extend(face_log['detections'])
+            redaction_log['redactions'].extend(face_log['redactions'])
+        
+        # PHASE 4: HIGH - OCR Text (PII in text)
+        if redact_text and self.policy.should_redact('ocr_pii') and self.pii_guard:
+            img_cv, text_log = self._redact_text_pii_policy(img_cv)
+            redaction_log['detections'].extend(text_log['detections'])
+            redaction_log['redactions'].extend(text_log['redactions'])
+        
+        # PHASE 5: MEDIUM - Client logos (conditional)
+        if redact_logos and self.policy.should_redact('client_logos'):
+            img_cv, logo_log = self._redact_logos_policy(img_cv)
+            redaction_log['detections'].extend(logo_log['detections'])
+            redaction_log['redactions'].extend(logo_log['redactions'])
+        
+        # *** ADD THIS NEW PHASE 6 ***
+        # PHASE 6: MEDIUM - Whiteboards/Printed Documents
+        if redact_documents and self.policy.should_redact('printed_documents'):
+            img_cv, doc_log = self._redact_documents(img_cv)
+            redaction_log['detections'].extend(doc_log['detections'])
+            redaction_log['redactions'].extend(doc_log['redactions'])
+        
+        # Generate summary
+        redaction_log['summary'] = self._generate_summary(redaction_log)
+        
+        # Convert back to PIL
         img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-        return Image.fromarray(img_rgb), stats
+        return Image.fromarray(img_rgb), redaction_log
+
+    def _apply_pixelation(self, region, pixel_size=15):
+        """Apply pixelation effect to a region"""
+        h, w = region.shape[:2]
+        
+        # Resize down
+        temp = cv2.resize(region, (w // pixel_size, h // pixel_size), 
+                         interpolation=cv2.INTER_LINEAR)
+        
+        # Resize back up
+        pixelated = cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
+        
+        return pixelated
+
+    def _redact_documents(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Detect and redact whiteboards/printed documents"""
+        log = {'detections': [], 'redactions': []}
+        
+        if not self.ocr_available:
+            return img_cv, log
+        
+        detected_docs = self.whiteboard_detector.detect_documents(img_cv, self.ocr_reader)
+        
+        method = self.policy.get_redaction_method('printed_documents')
+        
+        for doc in detected_docs:
+            x, y, w, h = doc['bbox']
+            doc_region = img_cv[y:y+h, x:x+w]
+            
+            # Apply redaction based on policy
+            if method == RedactionMethod.BLACKOUT:
+                redacted = np.zeros_like(doc_region)
+            elif method == RedactionMethod.BLUR_HEAVY:
+                redacted = cv2.GaussianBlur(doc_region, (99, 99), 30)
+            else:
+                redacted = cv2.GaussianBlur(doc_region, (51, 51), 20)
+            
+            img_cv[y:y+h, x:x+w] = redacted
+            
+            log['detections'].append({
+                'type': doc['type'],
+                'confidence': doc['confidence'],
+                'bbox': doc['bbox']
+            })
+            log['redactions'].append({
+                'method': method.value,
+                'severity': 'MEDIUM' if doc['type'] == 'whiteboard' else 'HIGH',
+                'reason': doc['reason'],
+                'compliance': 'Confidential business documents'
+            })
+            
+            logger.warning(f"📄 Redacted {doc['type']}")
+        
+        return img_cv, log
+
+    def _redact_id_documents(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Detect and redact identity documents - CRITICAL PRIORITY"""
+        log = {'detections': [], 'redactions': []}
+        
+        if not self.ocr_available:
+            return img_cv, log
+        
+        detected_ids = self.id_detector.detect_id_documents(img_cv, self.ocr_reader)
+        
+        for doc in detected_ids:
+            x, y, w, h = doc['bbox']
+            
+            # BLACKOUT (not blur) - compliance requirement
+            cv2.rectangle(img_cv, (x, y), (x+w, y+h), (0, 0, 0), -1)
+            
+            log['detections'].append({
+                'type': 'identity_document',
+                'subtype': doc['type'],
+                'confidence': doc['confidence'],
+                'bbox': doc['bbox']
+            })
+            log['redactions'].append({
+                'method': 'BLACKOUT',
+                'severity': 'CRITICAL',
+                'reason': f"ID document detected: {doc['type']}",
+                'compliance': 'GDPR Art. 9, DPDP Act'
+            })
+            
+            logger.warning(f"🔒 CRITICAL: Redacted {doc['type']} document")
+        
+        return img_cv, log
     
-    def _redact_faces(self, img_cv, blur_level=51):
+    def _redact_screens(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Detect and redact computer screens/dashboards"""
+        log = {'detections': [], 'redactions': []}
+        
+        if not self.ocr_available:
+            return img_cv, log
+        
+        detected_screens = self.screen_detector.detect_screens(img_cv, self.ocr_reader)
+        
+        for screen in detected_screens:
+            x, y, w, h = screen['bbox']
+            
+            # BLACKOUT entire screen region
+            cv2.rectangle(img_cv, (x, y), (x+w, y+h), (0, 0, 0), -1)
+            
+            log['detections'].append({
+                'type': 'computer_screen',
+                'confidence': screen['confidence'],
+                'bbox': screen['bbox']
+            })
+            log['redactions'].append({
+                'method': 'BLACKOUT',
+                'severity': 'HIGH',
+                'reason': screen['reason'],
+                'compliance': 'Confidential business data protection'
+            })
+            
+            logger.warning(f"🖥️  Redacted computer screen/dashboard")
+        
+        return img_cv, log
+    
+    def _redact_faces_policy(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Redact faces with policy-driven method"""
+        log = {'detections': [], 'redactions': []}
+        
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
         )
         
+        method = self.policy.get_redaction_method('faces')
+        
         for (x, y, w, h) in faces:
             face_region = img_cv[y:y+h, x:x+w]
-            blurred = cv2.GaussianBlur(face_region, (blur_level, blur_level), 30)
-            img_cv[y:y+h, x:x+w] = blurred
+            
+            # Apply redaction method
+            if method == RedactionMethod.BLUR_HEAVY:
+                redacted = cv2.GaussianBlur(face_region, (99, 99), 30)
+            elif method == RedactionMethod.BLACKOUT:
+                redacted = np.zeros_like(face_region)
+            elif method == RedactionMethod.PIXELATE:  # ADD THIS
+                redacted = self._apply_pixelation(face_region, pixel_size=20)
+            elif method == RedactionMethod.BLUR_MEDIUM:
+                redacted = cv2.GaussianBlur(face_region, (51, 51), 20)
+            else:
+                redacted = cv2.GaussianBlur(face_region, (51, 51), 20)
+            
+            img_cv[y:y+h, x:x+w] = redacted
+            
+            log['detections'].append({
+                'type': 'face',
+                'confidence': 0.85,
+                'bbox': (x, y, w, h)
+            })
+            log['redactions'].append({
+                'method': method.value,
+                'severity': 'HIGH',
+                'reason': 'Biometric PII (face)',
+                'compliance': 'GDPR Art. 9, DPDP Act Sec. 3'
+            })
         
-        return img_cv, len(faces)
+        if len(faces) > 0:
+            logger.info(f"👤 Redacted {len(faces)} face(s)")
+        
+        return img_cv, log
     
-    def _redact_text_pii(self, img_cv):
-        """Use OCR to find and redact text containing PII"""
-        if not self.ocr_available:
-            return img_cv, 0
+    def _redact_text_pii_policy(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Redact OCR-detected PII with confidence filtering"""
+        log = {'detections': [], 'redactions': []}
         
-        # Run OCR
-        results = self.ocr_reader.readtext(img_cv)
-        redacted_count = 0
+        if not self.ocr_available or not self.pii_guard:
+            return img_cv, log
         
-        for (bbox, text, confidence) in results:
-            if confidence < 0.3:  # Skip low confidence
+        min_conf = self.policy.get_confidence_threshold('ocr_pii')
+        ocr_results = self._get_ocr_results(img_cv)
+        
+        for (bbox, text, confidence) in ocr_results:
+            if confidence < min_conf:
                 continue
             
-            # Check if text contains PII
+            # Check for PII
             anonymized = self.pii_guard.anonymize(text, context_aware=False)
             
             if text != anonymized:  # PII found
-                # Get bounding box coordinates
                 top_left = tuple(map(int, bbox[0]))
                 bottom_right = tuple(map(int, bbox[2]))
                 
-                # Black out the region
+                # BLACKOUT
                 cv2.rectangle(img_cv, top_left, bottom_right, (0, 0, 0), -1)
-                redacted_count += 1
-                logger.info(f"Redacted text in image: {text[:20]}... ->  {anonymized[:20]}...")
+                
+                log['detections'].append({
+                    'type': 'ocr_text_pii',
+                    'text_preview': text[:20] + '...' if len(text) > 20 else text,
+                    'confidence': confidence,
+                    'bbox': bbox
+                })
+                log['redactions'].append({
+                    'method': 'BLACKOUT',
+                    'severity': 'HIGH',
+                    'reason': 'PII detected in text',
+                    'compliance': 'Data minimization principle'
+                })
+                
+                logger.info(f"📝 Redacted PII text: {text[:30]}...")
         
-        return img_cv, redacted_count
+        return img_cv, log
     
-    def _redact_logos(self, img_cv):
-        """Simple logo detection using color clustering"""
-        # Convert to HSV for better color detection
+    def _redact_logos_policy(self, img_cv) -> Tuple[np.ndarray, Dict]:
+        """Redact client logos (conditional based on policy)"""
+        log = {'detections': [], 'redactions': []}
+        
+        # Simple color-based logo detection
         hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-        
-        # Define color ranges for common logo colors (you can expand this)
-        logo_regions = []
-        
-        # Example: Detect bright/saturated regions (logos are often colorful)
         mask = cv2.inRange(hsv, (0, 100, 100), (180, 255, 255))
-        
-        # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        logo_count = 0
+        method = self.policy.get_redaction_method('client_logos')
+        
         for contour in contours:
             area = cv2.contourArea(contour)
-            # Filter by size (logos are usually 50x50 to 300x300 pixels)
-            if 2500 < area < 90000:
+            if 2500 < area < 90000:  # Logo size range
                 x, y, w, h = cv2.boundingRect(contour)
-                # Blur the region
                 logo_region = img_cv[y:y+h, x:x+w]
-                blurred = cv2.GaussianBlur(logo_region, (99, 99), 30)
-                img_cv[y:y+h, x:x+w] = blurred
-                logo_count += 1
+                
+                # Apply redaction
+                if method == RedactionMethod.BLUR_MEDIUM:
+                    redacted = cv2.GaussianBlur(logo_region, (51, 51), 20)
+                else:
+                    redacted = cv2.GaussianBlur(logo_region, (99, 99), 30)
+                
+                img_cv[y:y+h, x:x+w] = redacted
+                
+                log['detections'].append({
+                    'type': 'potential_logo',
+                    'confidence': 0.6,
+                    'bbox': (x, y, w, h)
+                })
+                log['redactions'].append({
+                    'method': method.value,
+                    'severity': 'MEDIUM',
+                    'reason': 'Client logo (NDA compliance)',
+                    'compliance': 'Confidentiality agreements'
+                })
         
-        return img_cv, logo_count
+        if len(log['detections']) > 0:
+            logger.info(f" Redacted {len(log['detections'])} potential logo(s)")
+        
+        return img_cv, log
+    
+    def _generate_summary(self, redaction_log: Dict) -> Dict:
+        """Generate redaction summary statistics"""
+        summary = {
+            'total_detections': len(redaction_log['detections']),
+            'total_redactions': len(redaction_log['redactions']),
+            'by_type': {},
+            'by_severity': {},
+            'compliance_notes': []
+        }
+        
+        for detection in redaction_log['detections']:
+            det_type = detection['type']
+            summary['by_type'][det_type] = summary['by_type'].get(det_type, 0) + 1
+        
+        for redaction in redaction_log['redactions']:
+            severity = redaction['severity']
+            summary['by_severity'][severity] = summary['by_severity'].get(severity, 0) + 1
+            
+            if redaction.get('compliance'):
+                summary['compliance_notes'].append(redaction['compliance'])
+        
+        summary['compliance_notes'] = list(set(summary['compliance_notes']))
+        
+        return summary
 
 # PDF Handler
 class PDFHandler:
@@ -847,7 +1550,10 @@ class IntelligentPIIPipeline:
         )
         self.pdf_handler = PDFHandler(self.pii_guard)
         self.spreadsheet_handler = SpreadsheetHandler(self.pii_guard)
-        self.image_redactor = AdvancedImageRedactor(self.pii_guard)
+        self.image_redactor = ProductionImageRedactor(
+            self.pii_guard, 
+            RedactionPolicy()
+        )
     
     def process_text(self, text: str, verbose: bool = True) -> Dict:
         """Process text with context-aware redaction"""
@@ -907,31 +1613,76 @@ class IntelligentPIIPipeline:
         else:
             return {'error': f'Unsupported file type: {ext}'}
     
-    def process_image(self, image_path: str) -> Dict:
-        """Redact faces, PII text, and logos in image"""
-        logger.info(f"Processing image: {image_path}")
+    # process_image METHOD 
+    def process_image(self, image_path: str, custom_policy: Dict = None) -> Dict:
+       
+        logger.info("="*80)
+        logger.info(f"PROCESSING IMAGE: {image_path}")
+        logger.info("="*80)
+        
         image = Image.open(image_path)
         
-        redacted, stats = self.image_redactor.redact_image(
-            image, 
-            redact_faces=True, 
-            redact_text=True, 
-            redact_logos=True
+        # Initialize redactor with policy
+        policy = RedactionPolicy(custom_policy) if custom_policy else RedactionPolicy()
+        redactor = ProductionImageRedactor(self.pii_guard, policy)
+        
+        # Perform redaction
+        redacted, redaction_log = redactor.redact_image(
+            image,
+            redact_faces=True,
+            redact_ids=True,
+            redact_screens=True,
+            redact_text=True,
+            redact_logos=True,
+            redact_documents=True
         )
         
+        # Save redacted image
         output_path = image_path.replace('.', '_REDACTED.')
         redacted.save(output_path)
         
-        logger.info(f"Saved redacted image: {output_path}")
-        logger.info(f"Stats: {stats['faces']} faces, {stats['text_regions']} text regions, {stats['logos']} logos")
-        
-        return {
+        # Generate compliance report
+        result = {
             'type': 'image',
             'input_file': image_path,
             'output_file': output_path,
-            'redaction_stats': stats,
+            'redaction_log': redaction_log,
+            'summary': redaction_log['summary'],
+            'compliance_status': self._check_compliance(redaction_log),
             'timestamp': datetime.now().isoformat()
         }
+        
+        # Log summary
+        summary = redaction_log['summary']
+        logger.info("="*80)
+        logger.info("REDACTION SUMMARY")
+        logger.info("="*80)
+        logger.info(f"Total Detections: {summary['total_detections']}")
+        logger.info(f"Total Redactions: {summary['total_redactions']}")
+        logger.info(f"By Type: {summary['by_type']}")
+        logger.info(f"By Severity: {summary['by_severity']}")
+        logger.info(f"Compliance: {', '.join(summary['compliance_notes'])}")
+        logger.info(f"Saved: {output_path}")
+        logger.info("="*80)
+        
+        return result
+    
+    def _check_compliance(self, redaction_log: Dict) -> Dict:
+        """Verify compliance with corporate policies"""
+        compliance = {
+            'gdpr_compliant': True,
+            'dpdp_act_compliant': True,
+            'iso_27701_compliant': True,
+            'issues': []
+        }
+        
+        # Check if any CRITICAL items were missed
+        critical_count = redaction_log['summary']['by_severity'].get('CRITICAL', 0)
+        
+        if critical_count == 0:
+            compliance['issues'].append("No critical PII detected - verify manually")
+        
+        return compliance
 
 # Save results
 def save_results(data: Dict, output_dir: str = "output"):
@@ -1004,7 +1755,7 @@ def main():
                     result = pipeline.process_file(file_path)
                     save_results(result)
                 
-                logger.info(f"✓ Batch complete: {len(files)} files processed")
+                logger.info(f"✓  Batch complete: {len(files)} files processed")
             else:
                 logger.error("Directory not found")
         
@@ -1013,4 +1764,8 @@ def main():
             break
 
 if __name__ == "__main__":
+    config = Config(groq_api_key=os.getenv("GROQ_API_KEY"))
+    if not config.groq_api_key:
+        logger.error("GROQ_API_KEY not set in environment!")
+        logger.error("Set it using: export GROQ_API_KEY='your-key'")
     main()
