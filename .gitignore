@@ -4,10 +4,12 @@ jay.jpg
 jay_REDACTED.jpg
 wrapper_2.py
 create_corporate_pdf.py
+create_test_img.py
+pii_redaction.log
 
 # Ignore all JSON files ONLY in root directory
 /*.json
-
+/imgs
 # Ignore all PDF files (anywhere)
 *.pdf
 
