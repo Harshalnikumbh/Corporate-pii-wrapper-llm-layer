@@ -107,7 +107,7 @@ class RedactionPolicy:
                 'method': RedactionMethod.BLACKOUT,
                 'types': ['aadhaar', 'pan', 'passport', 'driving_license', 
                          'employee_badge', 'voter_id', 'id_card'],
-                'min_confidence': 0.6,
+                'min_confidence': 0.4,
                 'reason': 'Identity documents - full redaction required'
             },
             'screens_dashboards': {
@@ -116,14 +116,14 @@ class RedactionPolicy:
                 'method': RedactionMethod.BLACKOUT,
                 'keywords': ['dashboard', 'email', 'inbox', 'crm', 'jira', 
                             'excel', 'spreadsheet', 'report', 'analytics'],
-                'min_confidence': 0.5,
+                'min_confidence': 0.4,
                 'reason': 'Potential confidential business data'
             },
             'ocr_pii': {
                 'enabled': True,
                 'severity': RedactionSeverity.HIGH,
                 'method': RedactionMethod.BLACKOUT,
-                'min_confidence': 0.4,
+                'min_confidence': 0.3,
                 'entity_types': ['PERSON', 'PHONE_NUMBER', 'EMAIL_ADDRESS',
                                'AADHAAR_NUMBER', 'PAN_NUMBER', 'BANK_ACCOUNT',
                                'PASSPORT', 'EMPLOYEE_ID'],
@@ -163,6 +163,20 @@ class RedactionPolicy:
                 'enabled': False,
                 'categories': ['furniture', 'office_layout', 'plants', 
                               'generic_signage', 'walls', 'ceiling']
+            },
+            'id_document_fields': {
+                    'enabled': True,
+                    'severity': RedactionSeverity.CRITICAL,
+                    'method': RedactionMethod.BLACKOUT,
+                    'fields': [
+                        'name_regional_language',
+                        'name_english',
+                        'aadhaar_number',
+                        'dob',
+                        'address',
+                        'gender'
+                    ],
+                    'reason': 'PII fields inside identity documents'
             }
         }
     
@@ -392,10 +406,21 @@ class IDDocumentDetector:
             'employee_badge': ['employee id', 'emp id', 'staff id', 'badge'],
             'voter_id': ['election commission', 'elector', 'voter']
         }
+        
+        # PII field patterns for individual redaction
+        self.pii_field_patterns = {
+            'name': ['name', 'नाम', 'naam'],
+            'dob': ['dob', 'date of birth', 'जन्म तारीख', 'birth'],
+            'aadhaar_number': [r'\d{4}\s?\d{4}\s?\d{4}'],  # 12-digit Aadhaar
+            'address': ['address', 'पता', 'residence']
+        }
 
     @retry_on_failure(max_retries=2, delay=1)
     def detect_id_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
-        
+        """
+        Detect ID documents and return INDIVIDUAL PII FIELDS to redact,
+        NOT the entire document.
+        """
         detected_docs = []
         
         if ocr_reader is None:
@@ -406,54 +431,192 @@ class IDDocumentDetector:
             ocr_results = ocr_reader.readtext(image_cv)
             full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
             
-            # Check for each ID type
-            for doc_type, keywords in self.id_keywords.items():
+            # Check if this is an ID document
+            is_id_document = False
+            doc_type = None
+            
+            for dtype, keywords in self.id_keywords.items():
                 for keyword in keywords:
                     if keyword in full_text:
-                        # Find bounding box of the document
-                        bbox = self._find_document_region(image_cv, ocr_results, keywords)
-                        if bbox:
-                            detected_docs.append({
-                                'type': doc_type,
-                                'bbox': bbox,
-                                'confidence': 0.85,
-                                'reason': f'Keyword match: {keyword}'
-                            })
-                            logger.info(f"ID Document detected: {doc_type}")
-                            break  # One match per type
+                        is_id_document = True
+                        doc_type = dtype
+                        break
+                if is_id_document:
+                    break
+            
+            if not is_id_document:
+                return detected_docs
+            
+            logger.info(f"ID Document detected: {doc_type}")
+            
+            # NOW DETECT INDIVIDUAL PII FIELDS WITHIN THE DOCUMENT
+            pii_fields = self._detect_pii_fields(image_cv, ocr_results)
+            
+            for field in pii_fields:
+                detected_docs.append({
+                    'type': f'{doc_type}_{field["field_type"]}',
+                    'bbox': field['bbox'],
+                    'confidence': 0.85,
+                    'reason': f'PII field: {field["field_type"]}',
+                    'field_type': field['field_type']
+                })
+                logger.info(f"Detected PII field: {field['field_type']} at {field['bbox']}")
         
         except Exception as e:
             logger.warning(f"ID document detection failed: {e}")
         
         return detected_docs
     
+    def _detect_pii_fields(self, image_cv, ocr_results) -> List[Dict]:
+        """Detect individual PII fields within ID document OCR results"""
+        pii_fields = []
+        processed_indices = set()
+
+        # Government labels to skip (exact matches, case-insensitive)
+        GOVERNMENT_LABELS = {
+            'भारत सरकार', 'government of india', 'govt of india',
+            'aadhaar', 'आधार', 'uid',
+            'male', 'female', 'पुरुष', 'स्त्री', 'पुरुप',
+            'माझे आधार', 'माझी ओळख', 'my aadhaar', 'my identity'
+        }
+        
+        for idx, (bbox, text, conf) in enumerate(ocr_results):
+            if idx in processed_indices:
+                continue
+            
+            # Clean text
+            text_clean = text.strip()
+            text_lower = text_clean.lower()
+            
+            # Skip very short text
+            if len(text_clean) < 2:
+                continue
+            
+            # LOWER confidence threshold for Marathi/Hindi text (OCR struggles with it)
+            has_devanagari = any('\u0900' <= char <= '\u097F' for char in text_clean)
+            min_confidence = 0.4 if has_devanagari else 0.5
+            
+            if conf < min_confidence:
+                logger.debug(f"Skipping low confidence ({conf:.2f}): {text_clean}")
+                continue
+            
+            # ========== PRIORITY 1: AADHAAR NUMBER ==========
+            if re.search(r'\d{4}\s?\d{4}\s?\d{4}', text_clean):
+                pii_fields.append({
+                    'field_type': 'aadhaar_number',
+                    'bbox': self._bbox_to_rect(bbox),
+                    'text': text_clean
+                })
+                processed_indices.add(idx)
+                logger.info(f"✓ AADHAAR NUMBER detected")
+                continue
+            
+            # ========== PRIORITY 2: DATE OF BIRTH ==========
+            if ('dob' in text_lower or 'जन्म' in text_clean) and re.search(r'\d{2}/\d{2}/\d{4}', text_clean):
+                pii_fields.append({
+                    'field_type': 'dob',
+                    'bbox': self._bbox_to_rect(bbox),
+                    'text': text_clean
+                })
+                processed_indices.add(idx)
+                logger.info(f"✓ DOB detected (with label): {text_clean}")
+                continue
+            
+            # ========== PRIORITY 3: CHECK IF IT'S A GOVERNMENT LABEL ==========
+            # Skip if text is a known government label or contains label keywords
+            gender_keywords = ['male', 'female', 'पुरुष', 'स्त्री', 'पुरुप']
+            if any(kw in text_lower for kw in gender_keywords):
+                pii_fields.append({
+                    'field_type': 'gender',
+                    'bbox': self._bbox_to_rect(bbox),
+                    'text': text_clean
+                })
+                processed_indices.add(idx)
+                logger.info(f"✓ GENDER detected: {text_clean}")
+                continue
+
+            is_government_label = False
+            
+            # Exact match check
+            if text_lower in GOVERNMENT_LABELS:
+                is_government_label = True
+            
+            # Contains DOB label
+            if 'dob' in text_lower or 'जन्म' in text_clean:
+                is_government_label = True
+            
+            # Contains gender label  
+            if text_lower in ['male', 'female', 'पुरुष', 'स्त्री', 'पुरुप']:
+                is_government_label = True
+            
+            if is_government_label:
+                logger.debug(f"SKIPPING government label: {text_clean}")
+                continue
+            
+            # ========== PRIORITY 4: MARATHI/HINDI NAMES ==========
+            if has_devanagari:
+                # It has Devanagari and it's NOT a government label
+                # Check it's not just a single character
+                if has_devanagari and len(text_clean) >= 3:
+                    pii_fields.append({
+                        'field_type': 'name_regional_language',
+                        'bbox': self._bbox_to_rect(bbox),
+                        'text': text_clean
+                    })
+                    processed_indices.add(idx)
+                    logger.info(f"✓ DETECTED MARATHI/HINDI NAME: {text_clean}")
+                    continue
+            
+            # ========== PRIORITY 5: ENGLISH NAMES ==========
+            # Capitalized words like "Jay", "Nilesh Pople"
+            if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', text_clean):
+                SKIP_WORDS = {'Male', 'Female', 'Government', 'India', 'Aadhaar', 
+                            'Name', 'Date', 'Birth', 'Addr  ess', 'Dob'}
+                
+                if text_clean not in SKIP_WORDS:
+                    pii_fields.append({
+                        'field_type': 'name_english',
+                        'bbox': self._bbox_to_rect(bbox),
+                        'text': text_clean
+                    })
+                    processed_indices.add(idx)
+                    logger.info(f"✓ ENGLISH NAME: {text_clean}")
+                    continue
+            
+            # ========== PRIORITY 6: ADDRESS ==========
+            if len(text_clean) > 30:
+                address_keywords = ['village', 'pin', 'district', 'गाव', 'पिन', 'जिल्हा']
+                if any(kw in text_lower for kw in address_keywords):
+                    pii_fields.append({
+                        'field_type': 'address',
+                        'bbox': self._bbox_to_rect(bbox),
+                        'text': text_clean
+                    })
+                    processed_indices.add(idx)
+                    logger.info(f"✓ ADDRESS detected")
+                    continue
+        
+        logger.info(f"TOTAL DETECTED: {len(pii_fields)} PII fields")
+        return pii_fields
+    
+    def _bbox_to_rect(self, bbox) -> Tuple[int, int, int, int]:
+        """Convert OCR bbox to (x, y, width, height)"""
+        points = np.array(bbox)
+        x_min, y_min = points.min(axis=0).astype(int)
+        x_max, y_max = points.max(axis=0).astype(int)
+        
+        # Convert to Python int (not numpy.int64) to fix JSON serialization
+        return (
+            int(x_min), 
+            int(y_min), 
+            int(x_max - x_min), 
+            int(y_max - y_min)
+        )
+    
     def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
         """Find bounding box containing ID document keywords"""
-        matching_boxes = []
-        
-        for (bbox, text, conf) in ocr_results:
-            if any(kw in text.lower() for kw in keywords):
-                matching_boxes.append(bbox)
-        
-        if not matching_boxes:
-            return None
-        
-        # Expand to cover entire document area
-        all_points = np.array([pt for box in matching_boxes for pt in box])
-        x_min, y_min = all_points.min(axis=0).astype(int)
-        x_max, y_max = all_points.max(axis=0).astype(int)
-        
-        # Add padding (20% on each side)
-        h, w = image_cv.shape[:2]
-        padding_x = int((x_max - x_min) * 0.2)
-        padding_y = int((y_max - y_min) * 0.2)
-        
-        x = max(0, x_min - padding_x)
-        y = max(0, y_min - padding_y)
-        width = min(w - x, x_max - x_min + 2 * padding_x)
-        height = min(h - y, y_max - y_min + 2 * padding_y)
-        
-        return (x, y, width, height)
+        # THIS METHOD IS NO LONGER USED - we detect individual fields now
+        pass
 
 # SCREEN/DASHBOARD DETECTOR
 class ScreenDashboardDetector:
@@ -475,25 +638,19 @@ class ScreenDashboardDetector:
         ]
     
     def detect_screens(self, image_cv, ocr_reader=None) -> List[Dict]:
-        """
-        Detect screens/dashboards in image
-        Returns: List of {'type': 'screen', 'bbox': (x,y,w,h), 'confidence': 0.9}
-        """
+        """Detect screens/dashboards in image"""
         detected_screens = []
         
         if ocr_reader is None:
             return detected_screens
         
         try:
-            # Run OCR
             ocr_results = ocr_reader.readtext(image_cv)
             full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
             
-            # Check for screen indicators
             matches = [ind for ind in self.screen_indicators if ind in full_text]
             
-            if len(matches) >= 2:  # At least 2 indicators = likely a screen
-                # Find the rectangular region containing UI elements
+            if len(matches) >= 2:
                 bbox = self._find_screen_region(image_cv, ocr_results)
                 
                 if bbox:
@@ -515,25 +672,23 @@ class ScreenDashboardDetector:
         if not ocr_results:
             return None
         
-        # Get all text regions
         all_boxes = [bbox for (bbox, _, _) in ocr_results]
         
-        if len(all_boxes) < 5:  # Too few elements
+        if len(all_boxes) < 5:
             return None
         
-        # Find dense region of text (likely a screen)
         all_points = np.array([pt for box in all_boxes for pt in box])
         x_min, y_min = all_points.min(axis=0).astype(int)
         x_max, y_max = all_points.max(axis=0).astype(int)
         
-        # Basic validation: screens are typically rectangular and sizable
         width = x_max - x_min
         height = y_max - y_min
         
-        if width < 200 or height < 150:  # Too small to be a screen
+        if width < 200 or height < 150:
             return None
         
         return (x_min, y_min, width, height)
+
 
 # WHITEBOARD/PRINTED DOCUMENT DETECTOR 
 class WhiteboardDocumentDetector:
@@ -541,39 +696,29 @@ class WhiteboardDocumentDetector:
     
     def __init__(self):
         self.document_keywords = [
-            # Document types
             'invoice', 'receipt', 'contract', 'agreement', 'offer letter',
             'payslip', 'salary slip', 'financial report', 'balance sheet',
             'meeting notes', 'minutes', 'confidential', 'internal use only',
-            # Document headers
             'to:', 'from:', 'subject:', 'date:', 'invoice no', 'bill to',
-            # Whiteboard indicators
             'project timeline', 'roadmap', 'sprint', 'q1', 'q2', 'q3', 'q4',
             'budget', 'revenue', 'target', 'milestone'
         ]
     
     def detect_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
-        """
-        Detect printed documents and whiteboards
-        Returns: List of {'type': 'document', 'bbox': (x,y,w,h), 'confidence': 0.8}
-        """
+        """Detect printed documents and whiteboards"""
         detected_docs = []
         
         if ocr_reader is None:
             return detected_docs
         
         try:
-            # Run OCR
             ocr_results = ocr_reader.readtext(image_cv)
             full_text = ' '.join([text for (_, text, _) in ocr_results]).lower()
             
-            # Check for document indicators
             matches = [kw for kw in self.document_keywords if kw in full_text]
             
-            if len(matches) >= 2:  # At least 2 document indicators
-                # Detect if it's a whiteboard (large white/light-colored region)
+            if len(matches) >= 2:
                 is_whiteboard = self._is_whiteboard(image_cv)
-                
                 bbox = self._find_document_region(image_cv, ocr_results)
                 
                 if bbox:
@@ -591,15 +736,10 @@ class WhiteboardDocumentDetector:
         return detected_docs
     
     def _is_whiteboard(self, image_cv) -> bool:
-        """Check if image contains a whiteboard (large white/light area)"""
-        # Convert to grayscale
+        """Check if image contains a whiteboard"""
         gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-        
-        # Count bright pixels (whiteboard is typically bright)
         bright_pixels = np.sum(gray > 200)
         total_pixels = gray.size
-        
-        # If >40% of image is bright, likely a whiteboard
         return (bright_pixels / total_pixels) > 0.4
     
     def _find_document_region(self, image_cv, ocr_results) -> Optional[Tuple]:
@@ -612,7 +752,6 @@ class WhiteboardDocumentDetector:
         if len(all_boxes) < 3:
             return None
         
-        # Find region containing text
         all_points = np.array([pt for box in all_boxes for pt in box])
         x_min, y_min = all_points.min(axis=0).astype(int)
         x_max, y_max = all_points.max(axis=0).astype(int)
@@ -620,7 +759,6 @@ class WhiteboardDocumentDetector:
         width = x_max - x_min
         height = y_max - y_min
         
-        # Expand to cover full document (add 10% padding)
         h, w = image_cv.shape[:2]
         padding_x = int(width * 0.1)
         padding_y = int(height * 0.1)
@@ -631,6 +769,7 @@ class WhiteboardDocumentDetector:
         height = min(h - y, height + 2 * padding_y)
         
         return (x, y, width, height)
+    
 # Indian Context PII Recognizers
 class IndianPIIRecognizers:
     
@@ -1250,12 +1389,12 @@ class ProductionImageRedactor:
                 'compliance': 'Confidential business documents'
             })
             
-            logger.warning(f"📄 Redacted {doc['type']}")
+            logger.warning(f"Redacted {doc['type']}")
         
         return img_cv, log
 
     def _redact_id_documents(self, img_cv) -> Tuple[np.ndarray, Dict]:
-        """Detect and redact identity documents - CRITICAL PRIORITY"""
+        """Detect and redact INDIVIDUAL PII FIELDS in identity documents"""
         log = {'detections': [], 'redactions': []}
         
         if not self.ocr_available:
@@ -1263,26 +1402,36 @@ class ProductionImageRedactor:
         
         detected_ids = self.id_detector.detect_id_documents(img_cv, self.ocr_reader)
         
+        method = self.policy.get_redaction_method('id_document_fields')
+
         for doc in detected_ids:
+            field = doc.get('field_type')
+
+            if not self.policy.should_redact('id_document_fields'):
+                continue
+            if field not in self.policy.policy['id_document_fields']['fields']:
+                logger.debug(f"Skipping field not in policy: {field}")
+                continue
             x, y, w, h = doc['bbox']
-            
-            # BLACKOUT (not blur) - compliance requirement
-            cv2.rectangle(img_cv, (x, y), (x+w, y+h), (0, 0, 0), -1)
+
+            if method == RedactionMethod.BLACKOUT:
+                cv2.rectangle(img_cv, (x, y), (x+w, y+h), (0, 0, 0), -1)
             
             log['detections'].append({
-                'type': 'identity_document',
+                'type': 'identity_document_field',
                 'subtype': doc['type'],
+                'field': doc.get('field_type', 'unknown'),
                 'confidence': doc['confidence'],
                 'bbox': doc['bbox']
             })
             log['redactions'].append({
                 'method': 'BLACKOUT',
                 'severity': 'CRITICAL',
-                'reason': f"ID document detected: {doc['type']}",
+                'reason': f"ID field: {doc.get('field_type', 'PII')}",
                 'compliance': 'GDPR Art. 9, DPDP Act'
             })
             
-            logger.warning(f"🔒 CRITICAL: Redacted {doc['type']} document")
+            logger.warning(f"Redacted {doc.get('field_type', 'PII')} field")
         
         return img_cv, log
     
@@ -1313,7 +1462,7 @@ class ProductionImageRedactor:
                 'compliance': 'Confidential business data protection'
             })
             
-            logger.warning(f"🖥️  Redacted computer screen/dashboard")
+            logger.warning(f"Redacted computer screen/dashboard")
         
         return img_cv, log
     
@@ -1348,7 +1497,7 @@ class ProductionImageRedactor:
             log['detections'].append({
                 'type': 'face',
                 'confidence': 0.85,
-                'bbox': (x, y, w, h)
+                'bbox': (int(x), int(y), int(w), int(h))
             })
             log['redactions'].append({
                 'method': method.value,
@@ -1358,7 +1507,7 @@ class ProductionImageRedactor:
             })
         
         if len(faces) > 0:
-            logger.info(f"👤 Redacted {len(faces)} face(s)")
+            logger.info(f"Redacted {len(faces)} face(s)")
         
         return img_cv, log
     
@@ -1399,7 +1548,7 @@ class ProductionImageRedactor:
                     'compliance': 'Data minimization principle'
                 })
                 
-                logger.info(f"📝 Redacted PII text: {text[:30]}...")
+                logger.info(f"Redacted PII text: {text[:30]}...")
         
         return img_cv, log
     
@@ -1768,4 +1917,4 @@ if __name__ == "__main__":
     if not config.groq_api_key:
         logger.error("GROQ_API_KEY not set in environment!")
         logger.error("Set it using: export GROQ_API_KEY='your-key'")
-    main()
+    main()  
