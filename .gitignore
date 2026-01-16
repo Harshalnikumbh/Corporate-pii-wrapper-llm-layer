@@ -6,10 +6,12 @@ wrapper_2.py
 create_corporate_pdf.py
 create_test_img.py
 pii_redaction.log
+test_ocr.py
 
 # Ignore all JSON files ONLY in root directory
 /*.json
 /imgs
+/*.jpg
 # Ignore all PDF files (anywhere)
 *.pdf
 
