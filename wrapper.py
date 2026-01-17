@@ -755,14 +755,15 @@ class IDDocumentDetector:
         
         # If ML fails, fallback to standard location
         logger.warning("ML detection failed, using fallback location")
-        h, w = image_cv.shape[:2]
+        # h, w = image_cv.shape[:2]
+        return []
         
-        return [{
-            'field_type': 'signature',
-            'bbox': (int(w * 0.05), int(h * 0.70), int(w * 0.45), int(h * 0.20)),
-            'text': 'SIGNATURE_FALLBACK',
-            'confidence': 0.60
-        }]
+        # return [{
+        #     'field_type': 'signature',
+        #     'bbox': (int(w * 0.05), int(h * 0.70), int(w * 0.45), int(h * 0.20)),
+        #     'text': 'SIGNATURE_FALLBACK',
+        #     'confidence': 0.60
+        # }]
             
     def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
         """Find bounding box containing ID document keywords"""
@@ -1614,7 +1615,7 @@ class ProductionImageRedactor:
         # OCR
         try:
             import easyocr
-            self.ocr_reader = easyocr.Reader(['en'])
+            self.ocr_reader = easyocr.Reader(['en','mr','hi'], gpu=False)
             self.ocr_available = True
             logger.info("[OK] EasyOCR initialized successfully")
         except Exception as e:
