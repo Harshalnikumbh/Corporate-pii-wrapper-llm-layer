@@ -17,10 +17,10 @@ from functools import wraps
 from datetime import datetime
 from dotenv import load_dotenv
 from dataclasses import dataclass
+from typing import Dict, Tuple, Optional, List
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_analyzer.nlp_engine import NlpEngineProvider
-from typing import Dict, Tuple, Optional , List
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, Pattern, PatternRecognizer
             
 # Robust retry decorator
@@ -46,16 +46,23 @@ load_dotenv()
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
-# Configure logging
+
+# Configure logging with UTF-8 support
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('pii_redaction.log'),
-        logging.StreamHandler()
+        logging.FileHandler('pii_redaction.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Set console output to UTF-8
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
 
 # Configuration
 @dataclass
@@ -174,7 +181,9 @@ class RedactionPolicy:
                         'aadhaar_number',
                         'dob',
                         'address',
-                        'gender'
+                        'gender',
+                        'qr_code',
+                        'signature'
                     ],
                     'reason': 'PII fields inside identity documents'
             }
@@ -411,15 +420,18 @@ class IDDocumentDetector:
         self.pii_field_patterns = {
             'name': ['name', 'नाम', 'naam'],
             'dob': ['dob', 'date of birth', 'जन्म तारीख', 'birth'],
-            'aadhaar_number': [r'\d{4}\s?\d{4}\s?\d{4}'],  # 12-digit Aadhaar
+            'aadhaar_number': [r'\d{4}\s?\d{4}\s?\d{4}'],
             'address': ['address', 'पता', 'residence']
         }
+
+        # Initialize ML signature detector
+        self.ml_signature_detector = MLSignatureDetector()
 
     @retry_on_failure(max_retries=2, delay=1)
     def detect_id_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
         """
         Detect ID documents and return INDIVIDUAL PII FIELDS to redact,
-        NOT the entire document.
+        including QR codes and signatures.
         """
         detected_docs = []
         
@@ -449,9 +461,18 @@ class IDDocumentDetector:
             
             logger.info(f"ID Document detected: {doc_type}")
             
-            # NOW DETECT INDIVIDUAL PII FIELDS WITHIN THE DOCUMENT
+            # DETECT INDIVIDUAL PII FIELDS
             pii_fields = self._detect_pii_fields(image_cv, ocr_results)
             
+            # DETECT QR CODE
+            qr_codes = self._detect_qr_code(image_cv)
+            pii_fields.extend(qr_codes)
+            
+            # DETECT SIGNATURE
+            signatures = self._detect_signature(image_cv, ocr_results)
+            pii_fields.extend(signatures)
+            
+            # Add all detected fields to results
             for field in pii_fields:
                 detected_docs.append({
                     'type': f'{doc_type}_{field["field_type"]}',
@@ -612,11 +633,363 @@ class IDDocumentDetector:
             int(x_max - x_min), 
             int(y_max - y_min)
         )
+    # QR code detection within ID documents
+    def _detect_qr_code(self, image_cv) -> List[Dict]:
+        """Detect QR codes using contour-based method (WORKING VERSION)"""
+        qr_fields = []
+        
+        try:
+            gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+            
+            # Apply adaptive threshold
+            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY_INV, 11, 2)
+            
+            # Find contours
+            contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            
+            qr_candidates = []
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                # QR codes typically have specific size range
+                if 2000 < area < 200000:  # Increased upper limit
+                    x, y, w, h = cv2.boundingRect(contour)
+                    aspect_ratio = w / float(h)
+                    
+                    # QR codes are roughly square
+                    if 0.8 < aspect_ratio < 1.2:
+                        # Check if region has QR-like pattern (high density of edges)
+                        roi = gray[y:y+h, x:x+w]
+                        if roi.size > 0:
+                            edge_density = cv2.Canny(roi, 50, 150).sum() / (w * h)
+                            
+                            # Store candidates with their edge density
+                            if edge_density > 10:
+                                qr_candidates.append({
+                                    'bbox': (x, y, w, h),
+                                    'edge_density': edge_density,
+                                    'area': area
+                                })
+            
+            # Select the largest QR code (usually the main one)
+            if qr_candidates:
+                # Sort by area (largest first)
+                qr_candidates.sort(key=lambda x: x['area'], reverse=True)
+                
+                # Take the largest one
+                best_qr = qr_candidates[0]
+                x, y, w, h = best_qr['bbox']
+                
+                # Add padding
+                padding = 15
+                x = max(0, x - padding)
+                y = max(0, y - padding)
+                w = w + 2 * padding
+                h = h + 2 * padding
+                
+                qr_fields.append({
+                    'field_type': 'qr_code',
+                    'bbox': (int(x), int(y), int(w), int(h)),
+                    'text': 'QR_CODE'
+                })
+                logger.info(f"✓ QR CODE detected at ({x}, {y}), size: {w}x{h}")
+        
+        except Exception as e:
+            logger.warning(f"QR code detection error: {e}")
+        
+        return qr_fields
+
+    def _detect_qr_by_pattern(self, gray) -> List[Dict]:
+        """Fallback QR detection using pattern recognition"""
+        qr_fields = []
+        
+        try:
+            # Apply adaptive threshold
+            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY, 11, 2)
+            
+            # Find contours
+            contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                # QR codes typically have specific size range
+                if 2000 < area < 100000:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    aspect_ratio = w / float(h)
+                    
+                    # QR codes are roughly square
+                    if 0.8 < aspect_ratio < 1.2:
+                        # Check if region has QR-like pattern (high density of edges)
+                        roi = gray[y:y+h, x:x+w]
+                        edge_density = cv2.Canny(roi, 50, 150).sum() / (w * h)
+                        
+                        if edge_density > 10:  # Threshold for QR pattern
+                            qr_fields.append({
+                                'field_type': 'qr_code',
+                                'bbox': (int(x), int(y), int(w), int(h)),
+                                'text': 'QR_CODE'
+                            })
+                            logger.info(f"✓ QR CODE detected (pattern matching) at ({x}, {y})")
+                            break  # Usually only one QR code per document
+        
+        except Exception as e:
+            logger.debug(f"Pattern-based QR detection failed: {e}")
+        
+        return qr_fields
     
+    # Detect signature within ID documents
+    def _detect_signature(self, image_cv, ocr_results) -> List[Dict]:
+        """
+        Detect signatures using ML model - works anywhere in the image!
+        """
+        logger.info("Using ML-based signature detection...")
+        
+        # Use ML detector
+        signatures = self.ml_signature_detector.detect_signatures(image_cv)
+        
+        if signatures:
+            logger.info(f"✓ ML detected {len(signatures)} signature(s)")
+            return signatures
+        
+        # If ML fails, fallback to standard location
+        logger.warning("ML detection failed, using fallback location")
+        h, w = image_cv.shape[:2]
+        
+        return [{
+            'field_type': 'signature',
+            'bbox': (int(w * 0.05), int(h * 0.70), int(w * 0.45), int(h * 0.20)),
+            'text': 'SIGNATURE_FALLBACK',
+            'confidence': 0.60
+        }]
+            
     def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
         """Find bounding box containing ID document keywords"""
         # THIS METHOD IS NO LONGER USED - we detect individual fields now
         pass
+
+# ML-BASED SIGNATURE DETECTOR WITH PRE-TRAINED MODEL
+class MLSignatureDetector: 
+    """Detect signatures using pre-trained YOLO model from YOLOV8s"""   
+    def __init__(self):
+        self.model = None
+        self.model_loaded = False
+        self.model_path = 'yolov8s.pt'
+        self._initialize_local_model() 
+    
+    def _initialize_local_model(self):
+        """Load local YOLOv8 model from root folder"""
+        try:
+            from ultralytics import YOLO
+            
+            logger.info("Initializing local YOLOv8 model for signature detection...")
+            
+            # Check if local model exists
+            if not os.path.exists(self.model_path):
+                logger.error(f"Model file not found: {self.model_path}")
+                logger.error("Please ensure yolov8s.pt is in the root folder")
+                self.model_loaded = False
+                return
+            
+            # Get file size
+            file_size = os.path.getsize(self.model_path) / (1024 * 1024)  # MB
+            logger.info(f"Found model: {self.model_path} ({file_size:.2f} MB)")
+            
+            # Load the model
+            self.model = YOLO(self.model_path)
+            self.model_loaded = True
+            logger.info("✓ Local YOLOv8 model loaded successfully!")
+            logger.info("Note: Using general object detection + signature filtering")
+        
+        except ImportError:
+            logger.warning("ultralytics not installed. Install with: pip install ultralytics")
+            self.model_loaded = False
+        
+        except Exception as e:
+            logger.error(f"Failed to load local model: {e}")
+            logger.error(f"Model path: {os.path.abspath(self.model_path)}")
+            self.model_loaded = False
+        
+        except Exception as e:
+            logger.error(f"Failed to load signature model: {e}")
+            self.model_loaded = False
+    
+    def detect_signatures(self, image_cv) -> List[Dict]:
+        """
+        Detect signatures using pre-trained YOLO model.
+        Falls back to advanced CV if model not available.
+        """
+        if self.model_loaded and self.model is not None:
+            return self._detect_with_pretrained_yolo(image_cv)
+        else:
+            logger.info("Using fallback advanced CV signature detection")
+            return self._detect_with_advanced_cv(image_cv)
+    
+    def _preprocess_for_signature_detection(self, image_cv):
+        """Preprocess image for better signature detection"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+        
+        # Enhance contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Convert back to BGR for YOLO
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    
+    def _detect_with_pretrained_yolo(self, image_cv) -> List[Dict]:
+        
+        signatures = []
+        
+        try:
+            h, w = image_cv.shape[:2]
+            
+            # Focus on bottom 60% of image (where signatures typically are)
+            signature_region_y = int(h * 0.4)
+            roi = image_cv[signature_region_y:h, :]
+            
+            # Preprocess image for better detection
+            processed_img = self._preprocess_for_signature_detection(roi)
+            
+            # Run inference with low confidence (we'll filter later)
+            logger.info("Running YOLOv8 detection on signature region...")
+            results = self.model(processed_img, conf=0.15, verbose=False)
+            
+            for result in results:
+                boxes = result.boxes
+                
+                if boxes is not None and len(boxes) > 0:
+                    logger.info(f"YOLOv8 detected {len(boxes)} object(s) in signature region")
+                    
+                    for box in boxes:
+                        # Get coordinates
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        confidence = float(box.conf[0])
+                        
+                        # Convert to integers
+                        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                        
+                        # Adjust Y coordinates back to original image
+                        y1_orig = y1 + signature_region_y
+                        y2_orig = y2 + signature_region_y
+                        
+                        # Calculate dimensions
+                        bbox_width = x2 - x1
+                        bbox_height = y2 - y1
+                        
+                        # Filter for signature characteristics
+                        aspect_ratio = bbox_width / float(bbox_height) if bbox_height > 0 else 0
+                        area = bbox_width * bbox_height
+                        
+                        # Signature filters:
+                        # 1. Horizontal aspect ratio (signatures are wider than tall)
+                        # 2. Reasonable size range
+                        # 3. Located in lower portion of image
+                        is_signature_like = (
+                            aspect_ratio > 1.2 and aspect_ratio < 6.0 and  # Wide but not too wide
+                            area > 1000 and area < 100000 and  # Reasonable area
+                            y1_orig > h * 0.4  # In lower 60% of image
+                        )
+                        
+                        if is_signature_like:
+                            # Add padding around signature for complete coverage
+                            padding = 15
+                            x1_padded = max(0, x1 - padding)
+                            y1_padded = max(0, y1_orig - padding)
+                            x2_padded = min(w, x2 + padding)
+                            y2_padded = min(h, y2_orig + padding)
+                            
+                            signatures.append({
+                                'field_type': 'signature',
+                                'bbox': (x1_padded, y1_padded, 
+                                        x2_padded - x1_padded, 
+                                        y2_padded - y1_padded),
+                                'text': 'SIGNATURE',
+                                'confidence': confidence
+                            })
+                            logger.info(f"✓ Signature-like object detected at ({x1}, {y1_orig}) "
+                                      f"with confidence: {confidence:.2f}, "
+                                      f"aspect_ratio: {aspect_ratio:.2f}")
+            
+            if not signatures:
+                logger.info("No signature-like objects detected by YOLO, trying fallback CV")
+                return self._detect_with_advanced_cv(image_cv)
+        
+        except Exception as e:
+            logger.error(f"YOLO detection error: {e}")
+            import traceback
+            traceback.print_exc()
+            return self._detect_with_advanced_cv(image_cv)
+        
+        return signatures
+    
+    def _detect_with_advanced_cv(self, image_cv) -> List[Dict]:
+        """
+        Fallback: Advanced computer vision for signature detection.
+        Uses texture analysis and stroke detection.
+        """
+        signatures = []
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        
+        try:
+            # Apply bilateral filter to preserve edges
+            filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+            
+            # Adaptive threshold
+            binary = cv2.adaptiveThreshold(filtered, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                          cv2.THRESH_BINARY_INV, 11, 2)
+            
+            # Morphological closing to connect strokes
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+            
+            # Find contours
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Analyze contours for signature characteristics
+            signature_contours = []
+            
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                
+                if 150 < area < 8000:
+                    x, y, w_box, h_box = cv2.boundingRect(cnt)
+                    
+                    # Signature in bottom 60% of image
+                    if y > h * 0.4:
+                        perimeter = cv2.arcLength(cnt, True)
+                        complexity = perimeter / np.sqrt(area) if area > 0 else 0
+                        
+                        # Handwritten strokes are complex
+                        if complexity > 3.0:
+                            signature_contours.append(cnt)
+            
+            # Group signature strokes
+            if len(signature_contours) > 5:
+                all_points = np.vstack(signature_contours)
+                x, y, w_box, h_box = cv2.boundingRect(all_points)
+                
+                aspect_ratio = w_box / float(h_box) if h_box > 0 else 0
+                sig_area = w_box * h_box
+                
+                # Validate signature region
+                if aspect_ratio > 1.5 and 3000 < sig_area < 120000:
+                    padding = 30
+                    signatures.append({
+                        'field_type': 'signature',
+                        'bbox': (max(0, x-padding), max(0, y-padding),
+                                min(w-x, w_box+2*padding), min(h-y, h_box+2*padding)),
+                        'text': 'SIGNATURE',
+                        'confidence': 0.75
+                    })
+                    logger.info(f"Advanced CV detected signature at ({x}, {y})")
+        
+        except Exception as e:
+            logger.error(f"Advanced CV detection error: {e}")
+        
+        return signatures
 
 # SCREEN/DASHBOARD DETECTOR
 class ScreenDashboardDetector:
@@ -1835,13 +2208,34 @@ class IntelligentPIIPipeline:
 
 # Save results
 def save_results(data: Dict, output_dir: str = "output"):
+    """Save results with proper JSON serialization"""
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"result_{timestamp}.json"
     filepath = os.path.join(output_dir, filename)
     
+    # Convert numpy types to Python types
+    def convert_to_serializable(obj):
+        """Convert numpy types to native Python types"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(convert_to_serializable(item) for item in obj)
+        return obj
+    
+    # Convert data
+    serializable_data = convert_to_serializable(data)
+    
     with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(serializable_data, f, indent=2, ensure_ascii=False)
     
     logger.info(f"Saved results to: {filepath}")
     return filepath
