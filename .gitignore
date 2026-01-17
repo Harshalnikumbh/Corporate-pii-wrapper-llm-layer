@@ -7,6 +7,8 @@ create_corporate_pdf.py
 create_test_img.py
 pii_redaction.log
 test_ocr.py
+test.py
+yolov8s.pt
 
 # Ignore all JSON files ONLY in root directory
 /*.json
@@ -15,12 +17,14 @@ test_ocr.py
 # Ignore all PDF files (anywhere)
 *.pdf
 
+
 # Ignore folders
 /json/
 pdfs/
 presidio-env/
 output/
-
+runs/
+.cache/
 # Optional: Python-related ignores (recommended)
 __pycache__/
 *.pyc
