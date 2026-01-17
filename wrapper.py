@@ -839,81 +839,111 @@ class MLSignatureDetector:
         return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
     
     def _detect_with_pretrained_yolo(self, image_cv) -> List[Dict]:
-        
+        """Detect signatures using pre-trained YOLOv8 model"""
         signatures = []
         
         try:
             h, w = image_cv.shape[:2]
             
-            # Focus on bottom 60% of image (where signatures typically are)
-            signature_region_y = int(h * 0.4)
-            roi = image_cv[signature_region_y:h, :]
+            # Preprocess ENTIRE image for better detection
+            processed_img = self._preprocess_for_signature_detection(image_cv)
             
-            # Preprocess image for better detection
-            processed_img = self._preprocess_for_signature_detection(roi)
+            # Run inference on FULL IMAGE with low confidence
+            logger.info("Running YOLOv8 detection on entire image...")
+            results = self.model(processed_img, conf=0.10, verbose=False)  # Very low threshold
             
-            # Run inference with low confidence (we'll filter later)
-            logger.info("Running YOLOv8 detection on signature region...")
-            results = self.model(processed_img, conf=0.15, verbose=False)
+            all_detections = []
             
             for result in results:
                 boxes = result.boxes
                 
                 if boxes is not None and len(boxes) > 0:
-                    logger.info(f"YOLOv8 detected {len(boxes)} object(s) in signature region")
+                    logger.info(f"YOLOv8 detected {len(boxes)} object(s) in image")
                     
                     for box in boxes:
                         # Get coordinates
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         confidence = float(box.conf[0])
+                        class_id = int(box.cls[0]) if box.cls is not None else -1
                         
                         # Convert to integers
                         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                        
-                        # Adjust Y coordinates back to original image
-                        y1_orig = y1 + signature_region_y
-                        y2_orig = y2 + signature_region_y
                         
                         # Calculate dimensions
                         bbox_width = x2 - x1
                         bbox_height = y2 - y1
                         
-                        # Filter for signature characteristics
+                        # Calculate characteristics
                         aspect_ratio = bbox_width / float(bbox_height) if bbox_height > 0 else 0
                         area = bbox_width * bbox_height
                         
-                        # Signature filters:
-                        # 1. Horizontal aspect ratio (signatures are wider than tall)
-                        # 2. Reasonable size range
-                        # 3. Located in lower portion of image
-                        is_signature_like = (
-                            aspect_ratio > 1.2 and aspect_ratio < 6.0 and  # Wide but not too wide
-                            area > 1000 and area < 100000 and  # Reasonable area
-                            y1_orig > h * 0.4  # In lower 60% of image
-                        )
+                        # Store all detections for analysis
+                        all_detections.append({
+                            'bbox': (x1, y1, x2, y2),
+                            'confidence': confidence,
+                            'aspect_ratio': aspect_ratio,
+                            'area': area,
+                            'class_id': class_id,
+                            'width': bbox_width,
+                            'height': bbox_height
+                        })
                         
-                        if is_signature_like:
-                            # Add padding around signature for complete coverage
-                            padding = 15
-                            x1_padded = max(0, x1 - padding)
-                            y1_padded = max(0, y1_orig - padding)
-                            x2_padded = min(w, x2 + padding)
-                            y2_padded = min(h, y2_orig + padding)
-                            
-                            signatures.append({
-                                'field_type': 'signature',
-                                'bbox': (x1_padded, y1_padded, 
-                                        x2_padded - x1_padded, 
-                                        y2_padded - y1_padded),
-                                'text': 'SIGNATURE',
-                                'confidence': confidence
-                            })
-                            logger.info(f"✓ Signature-like object detected at ({x1}, {y1_orig}) "
-                                      f"with confidence: {confidence:.2f}, "
-                                      f"aspect_ratio: {aspect_ratio:.2f}")
+                        logger.debug(f"Detection: pos=({x1},{y1}), size={bbox_width}x{bbox_height}, "
+                                   f"conf={confidence:.2f}, aspect={aspect_ratio:.2f}, area={area}")
+            
+            # Filter for signature-like objects
+            for det in all_detections:
+                x1, y1, x2, y2 = det['bbox']
+            
+                is_signature_like = (
+                    # Aspect ratio: signatures are horizontal (1.5 to 8 times wider than tall)
+                    det['aspect_ratio'] > 1.5 and det['aspect_ratio'] < 8.0 and
+                    
+                    # Size constraints
+                    det['width'] > 30 and det['width'] < w * 0.6 and  # Width: 30px to 60% of image
+                    det['height'] > 15 and det['height'] < h * 0.3 and  # Height: 15px to 30% of image
+                    
+                    # Area constraints
+                    det['area'] > 500 and det['area'] < 150000 and  # Reasonable signature area
+                    
+                    # Not too square (to exclude QR codes, photos)
+                    not (0.8 < det['aspect_ratio'] < 1.2)
+                )
+                
+                if is_signature_like:
+                    # Add generous padding around signature
+                    padding = 15
+                    x1_padded = max(0, x1 - padding)
+                    y1_padded = max(0, y1 - padding)
+                    x2_padded = min(w, x2 + padding)
+                    y2_padded = min(h, y2 + padding)
+                    
+                    signatures.append({
+                        'field_type': 'signature',
+                        'bbox': (x1_padded, y1_padded, 
+                                x2_padded - x1_padded, 
+                                y2_padded - y1_padded),
+                        'text': 'SIGNATURE',
+                        'confidence': det['confidence']
+                    })
+                    
+                    logger.info(f"✓ SIGNATURE DETECTED at ({x1}, {y1}) | "
+                              f"Size: {det['width']}x{det['height']} | "
+                              f"Confidence: {det['confidence']:.2f} | "
+                              f"Aspect Ratio: {det['aspect_ratio']:.2f}")
             
             if not signatures:
-                logger.info("No signature-like objects detected by YOLO, trying fallback CV")
+                logger.warning("No signature-like objects detected by YOLOv8")
+                logger.info(f"Total objects detected: {len(all_detections)}")
+                
+                # Show what was detected (for debugging)
+                if all_detections:
+                    logger.info("Detected objects (not matching signature criteria):")
+                    for i, det in enumerate(all_detections[:5]):  # Show first 5
+                        logger.info(f"  Object {i+1}: conf={det['confidence']:.2f}, "
+                                  f"aspect={det['aspect_ratio']:.2f}, area={det['area']}")
+                
+                logger.info("Trying fallback CV method...")
                 return self._detect_with_advanced_cv(image_cv)
         
         except Exception as e:
