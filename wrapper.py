@@ -913,7 +913,7 @@ class MLSignatureDetector:
                 
                 if is_signature_like:
                     # Add generous padding around signature
-                    padding = 15
+                    padding = 5 # earlier was 15
                     x1_padded = max(0, x1 - padding)
                     y1_padded = max(0, y1 - padding)
                     x2_padded = min(w, x2 + padding)
@@ -1007,7 +1007,7 @@ class MLSignatureDetector:
                 
                 # Validate signature region
                 if aspect_ratio > 1.5 and 3000 < sig_area < 120000:
-                    padding = 30
+                    padding = 5 # earlier was 30
                     signatures.append({
                         'field_type': 'signature',
                         'bbox': (max(0, x-padding), max(0, y-padding),
