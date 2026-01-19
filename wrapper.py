@@ -1474,19 +1474,19 @@ class ContextAwarePIIGuard:
         return anonymized_result.text
     
     def _preprocess_text_for_titles(self, text: str, results: List) -> List:
-        """
-        Adjust detection results to exclude common titles/prefixes.
-        Prevents redacting "Mr" in "Mr Harshal" - only redacts "Harshal"
-        """
+        
         from presidio_analyzer import RecognizerResult
         
-        # Common titles to preserve (case-insensitive matching)
+        # Common titles to preserve (WITHOUT periods - we'll handle periods separately)
         TITLES = {
-            'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'miss', 
-            'dr', 'dr.', 'prof', 'prof.', 'professor',
-            'sir', 'madam', 'master', 'rev', 'rev.', 'reverend',
-            'hon', 'hon.', 'honorable', 
-            'shri', 'smt', 'kumari'
+            'mr', 'mrs', 'ms', 'miss', 
+            'dr', 'prof', 'professor',
+            'sir', 'madam', 'master', 
+            'rev', 'reverend',
+            'hon', 'honorable', 
+            'shri', 'smt', 'kumari',
+            'capt', 'captain', 'col', 'colonel',
+            'maj', 'major', 'gen', 'general'
         }
         
         adjusted_results = []
@@ -1498,9 +1498,13 @@ class ContextAwarePIIGuard:
                 continue
                 
             entity_text = text[result.start:result.end]
-            entity_lower = entity_text.lower()
             
-            # Split into words
+            # Check if entity starts with a title
+            # We'll check both with and without period
+            title_found = None
+            title_length = 0
+            
+            # Split into words to check first word
             words = entity_text.split()
             
             if len(words) < 2:
@@ -1508,38 +1512,48 @@ class ContextAwarePIIGuard:
                 adjusted_results.append(result)
                 continue
             
-            # Check if first word is a title
-            first_word_clean = words[0].lower().rstrip('.')
+            first_word = words[0]
+            first_word_lower = first_word.lower()
             
-            if first_word_clean in TITLES:
-                # Title found! Adjust the start position
-                title_with_space = words[0]
+            # Check if first word matches a title (with or without period)
+            if first_word_lower in TITLES:
+                # Direct match without period: "Mr Harshal"
+                title_found = first_word
+                title_length = len(first_word)
                 
-                # Find where the name actually starts (after title + space)
-                # Use the original text to find the exact position
-                title_end_pos = entity_text.find(title_with_space) + len(title_with_space)
+            elif first_word_lower.rstrip('.') in TITLES:
+                # Match with period: "Mr. Harshal" or "Dr. Smith"
+                title_found = first_word
+                title_length = len(first_word)
+            
+            # If title found, adjust the entity boundaries
+            if title_found:
+                # Calculate new start position (skip title + spaces)
+                new_start_offset = title_length
                 
                 # Skip any whitespace after the title
-                while title_end_pos < len(entity_text) and entity_text[title_end_pos].isspace():
-                    title_end_pos += 1
+                while new_start_offset < len(entity_text) and entity_text[new_start_offset].isspace():
+                    new_start_offset += 1
                 
-                # Create adjusted result with new start position
-                if title_end_pos < len(entity_text):
+                # Make sure there's actual content after the title
+                if new_start_offset < len(entity_text):
+                    # Create adjusted result
                     adjusted_result = RecognizerResult(
                         entity_type=result.entity_type,
-                        start=result.start + title_end_pos,
+                        start=result.start + new_start_offset,
                         end=result.end,
                         score=result.score
                     )
                     
                     adjusted_name = text[adjusted_result.start:adjusted_result.end]
-                    logger.info(f"✓ Preserved title: '{entity_text}' → Redacting only: '{adjusted_name}'")
+                    logger.info(f"✓ Title preserved: '{entity_text}' → Redacting: '{adjusted_name}'")
                     adjusted_results.append(adjusted_result)
                 else:
-                    # Edge case: title only, no name
+                    # Edge case: only title, no name
+                    logger.debug(f"Skipping title-only entity: '{entity_text}'")
                     adjusted_results.append(result)
             else:
-                # No title, keep as is
+                # No title found, keep original
                 adjusted_results.append(result)
         
         return adjusted_results
