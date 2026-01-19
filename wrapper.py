@@ -1028,16 +1028,16 @@ class ScreenDashboardDetector:
     
     def __init__(self):
         self.screen_indicators = [
-            # UI Elements
-            'chrome', 'firefox', 'browser', 'toolbar',
-            # Applications
-            'gmail', 'outlook', 'slack', 'teams', 'zoom',
-            'excel', 'word', 'powerpoint', 'dashboard',
-            # UI Text
-            'inbox', 'sent', 'draft', 'new message',
-            'file', 'edit', 'view', 'help',
-            # Business Apps
-            'salesforce', 'jira', 'confluence', 'crm',
+            # UI Elements                         
+            'chrome', 'firefox', 'browser', 'toolbar',                         
+            # Applications                         
+            'gmail', 'outlook', 'slack', 'teams', 'zoom',                         
+            'excel', 'word', 'powerpoint', 'dashboard',                         
+            # UI Text                         
+            'inbox', 'sent', 'draft', 'new message',                         
+            'file', 'edit', 'view', 'help',                         
+            # Business Apps                         
+            'salesforce', 'jira', 'confluence', 'crm',                         
             'analytics', 'report', 'metrics'
         ]
     
@@ -1391,10 +1391,7 @@ class ContextAwarePIIGuard:
         return report
 
     def anonymize(self, text: str, context_aware: bool = True) -> str:
-        """
-        Anonymize text with context awareness.
-        Only redacts USER_PII and THIRD_PARTY_PII, keeps PUBLIC_FIGURE mentions.
-        """
+        """Anonymize PII in text with context-aware classification"""
         self.mapping.clear()
         self.reverse_mapping.clear()
         self.kept_entities.clear()
@@ -1405,6 +1402,8 @@ class ContextAwarePIIGuard:
         if not results:
             return text
         
+        results = self._preprocess_text_for_titles(text, results)
+
         # Build entity list for classification
         detected_entities = []
         for result in results:
@@ -1469,9 +1468,132 @@ class ContextAwarePIIGuard:
         )
         
         self._build_mapping(text, anonymized_result.text, filtered_results)
+
+        final_text = self._restore_titles_in_anonymized_text(text, anonymized_result.text)
         
         return anonymized_result.text
     
+    def _preprocess_text_for_titles(self, text: str, results: List) -> List:
+        """
+        Adjust detection results to exclude common titles/prefixes.
+        Prevents redacting "Mr" in "Mr Harshal" - only redacts "Harshal"
+        """
+        from presidio_analyzer import RecognizerResult
+        
+        # Common titles to preserve (case-insensitive matching)
+        TITLES = {
+            'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'miss', 
+            'dr', 'dr.', 'prof', 'prof.', 'professor',
+            'sir', 'madam', 'master', 'rev', 'rev.', 'reverend',
+            'hon', 'hon.', 'honorable', 
+            'shri', 'smt', 'kumari'
+        }
+        
+        adjusted_results = []
+        
+        for result in results:
+            # Only process PERSON entities
+            if result.entity_type != 'PERSON':
+                adjusted_results.append(result)
+                continue
+                
+            entity_text = text[result.start:result.end]
+            entity_lower = entity_text.lower()
+            
+            # Split into words
+            words = entity_text.split()
+            
+            if len(words) < 2:
+                # Single word, no title to remove
+                adjusted_results.append(result)
+                continue
+            
+            # Check if first word is a title
+            first_word_clean = words[0].lower().rstrip('.')
+            
+            if first_word_clean in TITLES:
+                # Title found! Adjust the start position
+                title_with_space = words[0]
+                
+                # Find where the name actually starts (after title + space)
+                # Use the original text to find the exact position
+                title_end_pos = entity_text.find(title_with_space) + len(title_with_space)
+                
+                # Skip any whitespace after the title
+                while title_end_pos < len(entity_text) and entity_text[title_end_pos].isspace():
+                    title_end_pos += 1
+                
+                # Create adjusted result with new start position
+                if title_end_pos < len(entity_text):
+                    adjusted_result = RecognizerResult(
+                        entity_type=result.entity_type,
+                        start=result.start + title_end_pos,
+                        end=result.end,
+                        score=result.score
+                    )
+                    
+                    adjusted_name = text[adjusted_result.start:adjusted_result.end]
+                    logger.info(f"✓ Preserved title: '{entity_text}' → Redacting only: '{adjusted_name}'")
+                    adjusted_results.append(adjusted_result)
+                else:
+                    # Edge case: title only, no name
+                    adjusted_results.append(result)
+            else:
+                # No title, keep as is
+                adjusted_results.append(result)
+        
+        return adjusted_results
+    
+    def _restore_titles_in_anonymized_text(self, original: str, anonymized: str) -> str:
+        
+        TITLES_PATTERN = r'\b(Mr\.?|Mrs\.?|Ms\.?|Miss|Dr\.?|Prof\.?|Professor|Sir|Madam|Master|Rev\.?|Reverend|Hon\.?|Honorable|Shri|Smt|Kumari)\s+'
+        
+        # Find all titles in original text
+        import re
+        
+        for match in re.finditer(TITLES_PATTERN, original, re.IGNORECASE):
+            title = match.group(0).strip()  # e.g., "Mr"
+            title_pos = match.start()
+            
+            pass
+
+        result = anonymized
+        
+        # Find all PERSON placeholders
+        placeholder_pattern = r'<PERSON_\d+>'
+        
+        for placeholder_match in re.finditer(placeholder_pattern, anonymized):
+            placeholder = placeholder_match.group()
+            placeholder_pos = placeholder_match.start()
+            
+            # Get the original name from mapping
+            if placeholder in self.reverse_mapping:
+                original_name = self.reverse_mapping[placeholder]
+                
+                # Find where this name appeared in original
+                name_positions = [m.start() for m in re.finditer(re.escape(original_name), original)]
+                
+                for name_pos in name_positions:
+                    # Check if there's a title before this position
+                    preceding_text = original[max(0, name_pos-20):name_pos]
+                    
+                    title_match = re.search(TITLES_PATTERN + r'$', preceding_text, re.IGNORECASE)
+                    
+                    if title_match:
+                        title = title_match.group(0).strip()
+                        
+                        # Check if this title is missing before the placeholder
+                        check_pos = max(0, placeholder_pos - 20)
+                        preceding_anon = anonymized[check_pos:placeholder_pos]
+                        
+                        if not re.search(re.escape(title) + r'\s*$', preceding_anon, re.IGNORECASE):
+                            # Title is missing! Add it
+                            result = result.replace(placeholder, f"{title} {placeholder}", 1)
+                            logger.info(f"✓ Restored title '{title}' before {placeholder}")
+                            break
+        
+        return result
+
     def _build_mapping(self, original: str, anonymized: str, results):
         for result in results:
             original_value = original[result.start:result.end]
