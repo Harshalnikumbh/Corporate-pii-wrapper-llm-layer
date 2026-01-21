@@ -1,13 +1,13 @@
-from flask import Flask, render_template, request, jsonify, send_file
 import os
-from werkzeug.utils import secure_filename
-from dotenv import load_dotenv
-from wrapper import IntelligentPIIPipeline, Config
-import logging
-from datetime import datetime
-from PIL import Image
 import io
 import base64
+import logging
+from PIL import Image
+from dotenv import load_dotenv
+from datetime import datetime
+from werkzeug.utils import secure_filename
+from wrapper import IntelligentPIIPipeline, Config
+from flask import Flask, render_template, request, jsonify, send_file
 
 load_dotenv()
 
