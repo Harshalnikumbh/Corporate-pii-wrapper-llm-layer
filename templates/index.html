@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PII-Safe Chatbot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🔒 PII-Safe Chatbot</h1>
+                <p class="subtitle">Context-aware AI with automatic PII redaction</p>
+            </div>
+            <button id="btsToggle" class="bts-toggle">
+                <span id="btsIcon">👁️</span> Behind the Scenes
+            </button>
+        </header>
+
+        <!-- Main Layout -->
+        <div class="main-layout">
+            <!-- Chat Panel -->
+            <div class="chat-panel" id="chatPanel">
+                <div class="chat-container">
+                    <div id="chatMessages" class="chat-messages">
+                        <div class="message bot-message">
+                            <div class="message-content">
+                                <strong>🤖 Assistant</strong>
+                                <p>Hello! I'm your PII-safe assistant. How i can help you ?</p>
+                                
+                                <!-- <p style="margin-top: 0.5rem;">Try typing a message or uploading a file!</p> -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Input Area -->
+                    <div class="input-area">
+                        <div class="input-container">
+                            <button id="attachBtn" class="attach-btn" title="Upload file">
+                                📎
+                            </button>
+                            <textarea 
+                                id="userInput" 
+                                placeholder="Type your message... (Your PII will be protected automatically)"
+                                rows="1"
+                            ></textarea>
+                            <button id="sendBtn" class="send-btn">
+                                <span id="sendIcon">➤</span>
+                            </button>
+                        </div>
+                        <div class="input-footer">
+                            <span class="status-indicator" id="statusIndicator">
+                                <span class="dot"></span> Ready
+                            </span>
+                            <span class="file-types">
+                                Supports: PNG, JPG, PDF, XLSX, CSV
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BTS Panel (Hidden by default) -->
+            <div class="bts-panel" id="btsPanel">
+                <div class="bts-container">
+                    <h3>🔍 Behind the Scenes</h3>
+                    <p class="bts-description">See how your messages and files are redacted</p>
+
+                    <div id="btsContent" class="bts-content">
+                        <div class="bts-placeholder">
+                            <svg width="100" height="100" viewBox="0 0 100 100">
+                                <circle cx="50" cy="50" r="40" stroke="#ddd" stroke-width="2" fill="none"/>
+                                <path d="M50 30 L50 70 M30 50 L70 50" stroke="#ddd" stroke-width="2"/>
+                            </svg>
+                            <p>Send a message or upload a file to see the redaction process</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden file input -->
+    <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.bmp,.pdf,.xlsx,.xls,.csv" style="display: none;">
+
+    <!-- Image Preview Modal -->
+    <div id="imageModal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close">&times;</span>
+            <h3 id="modalTitle">Image Comparison</h3>
+            <div class="image-comparison">
+                <div class="comparison-side">
+                    <h4>Original</h4>
+                    <img id="originalImage" src="" alt="Original">
+                </div>
+                <div class="comparison-side">
+                    <h4>Redacted</h4>
+                    <img id="redactedImage" src="" alt="Redacted">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
