@@ -1760,7 +1760,7 @@ class ProductionImageRedactor:
 
     # Validate image quality
     def _validate_image_quality(self, img_cv) -> Dict:
-        """Check if image quality is sufficient for redaction"""
+        """Check if image quality is sufficient for reda ction"""
         h, w = img_cv.shape[:2]
         
         validation = {
