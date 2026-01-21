@@ -90,6 +90,11 @@ class RedactionMethod(Enum):
     BLUR_LIGHT = "blur_light"  # Gaussian blur (25x25)
     PIXELATE = "pixelate"      # Pixelation effect
 
+class PIIUsageIntent(Enum):
+    COMPUTATION_ALLOWED = "COMPUTATION_ALLOWED"
+    TRANSFORMATION_ALLOWED = "TRANSFORMATION_ALLOWED"
+    REDACTION_REQUIRED = "REDACTION_REQUIRED"
+
 class RedactionPolicy:
     """Enterprise-grade image redaction policy"""
     
@@ -1370,7 +1375,69 @@ class ContextAwarePIIGuard:
         'HOME_ADDRESS': [],
         'PASSPORT': []
     }
-        
+    
+    def classify_pii_intent(self, text: str) -> Dict:
+        """
+        Decide whether PII in the prompt is REQUIRED to fulfill the user's request.
+        """
+        prompt = f"""
+    You are a DATA GOVERNANCE AI.
+
+    Determine if personal data in the user prompt is REQUIRED
+    to answer the user's request.
+
+    Text:
+    {text}
+
+    Allowed intents:
+
+    1. COMPUTATION_ALLOWED
+    - Age calculation
+    - Date difference
+    - Eligibility checks
+    Example: "My DOB is 04/10/2006, tell me my age"
+
+    2. TRANSFORMATION_ALLOWED
+    - Formatting
+    - Translation
+    - Masking requested by user
+
+    3. REDACTION_REQUIRED
+    - Casual mention of DOB, phone, address
+    - Sensitive data not required to answer
+
+    Rules:
+    - If removing the data breaks the task → COMPUTATION_ALLOWED
+    - Default to REDACTION_REQUIRED if unsure
+
+    Respond ONLY in JSON:
+    {{
+    "intent": "COMPUTATION_ALLOWED | TRANSFORMATION_ALLOWED | REDACTION_REQUIRED",
+    "reason": "short reason"
+    }}
+    """
+        try:
+            response = self.context_classifier.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=200
+            )
+
+            result_text = response.choices[0].message.content
+            json_match = re.search(r'\{.*\}', result_text, re.S)
+
+            if json_match:
+                return json.loads(json_match.group())
+
+        except Exception as e:
+            logger.warning(f"PII intent classification failed: {e}")
+
+        return {
+            "intent": PIIUsageIntent.REDACTION_REQUIRED.value,
+            "reason": "fallback"
+        }
+
     def get_redaction_report(self) -> Dict:
         """Generate detailed redaction report"""
         total_redacted = sum(len(v) for v in self.redaction_summary.values())
@@ -1392,12 +1459,20 @@ class ContextAwarePIIGuard:
 
     def anonymize(self, text: str, context_aware: bool = True) -> str:
         """Anonymize PII in text with context-aware classification"""
+
+        intent_decision = self.classify_pii_intent(text)
+        if intent_decision["intent"] == PIIUsageIntent.COMPUTATION_ALLOWED.value:
+            logger.info(
+            f"PII allowed for computation — skipping redaction. Reason: {intent_decision['reason']}"
+        )
+            return text
+        # Detect all PII
+        results = self.analyzer.analyze(text=text, language=self.language)
+
         self.mapping.clear()
         self.reverse_mapping.clear()
         self.kept_entities.clear()
         
-        # Detect all PII
-        results = self.analyzer.analyze(text=text, language=self.language)
         
         if not results:
             return text
@@ -1471,7 +1546,8 @@ class ContextAwarePIIGuard:
 
         final_text = self._restore_titles_in_anonymized_text(text, anonymized_result.text)
         
-        return anonymized_result.text
+        # return anonymized_result.text
+        return final_text
     
     def _preprocess_text_for_titles(self, text: str, results: List) -> List:
         
