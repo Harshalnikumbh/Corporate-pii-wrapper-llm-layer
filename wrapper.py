@@ -1464,6 +1464,7 @@ class ContextAwarePIIGuard:
             "intent": PIIUsageIntent.REDACTION_REQUIRED.value,
             "reason": "fallback"
         }
+    
 
     def get_redaction_report(self) -> Dict:
         """Generate detailed redaction report"""
@@ -1552,50 +1553,77 @@ class ContextAwarePIIGuard:
         
         if not filtered_results:
             return text
-        
-        # CORRECTED: Build unique entity mapping FIRST
-        entity_value_map = {}  # Maps entity_value -> unique placeholder
+    
+        # CONTEXT-AWARE: Build unique entity mapping with classification
+       
+        entity_value_map = {}  # Maps (entity_value, classification) -> unique placeholder
         global_counters = {}   # Counter per entity type
+        entity_positions = {}  # Track which placeholder to use for each position
 
         for result in filtered_results:
             entity_type = result.entity_type
             entity_value = text[result.start:result.end]
+            classification = classifications.get(entity_value, 'KEEP')
             
-            #  reuse its placeholder
-            if entity_value not in entity_value_map:
-                # First time seeing this entity value, assign new number
+            # Create a unique key combining entity value AND its classification context
+            entity_context_key = (entity_value, classification)
+            
+            # If we've seen this exact (value, context) combination before, reuse placeholder
+            if entity_context_key not in entity_value_map:
+                # First time seeing this entity in this context, assign new number
                 global_counters[entity_type] = global_counters.get(entity_type, 0) + 1
                 unique_number = global_counters[entity_type]
-                placeholder = f"<{entity_type}_{unique_number}>"
+                placeholder = self._get_semantic_placeholder(entity_type, classification, unique_number)
                 
                 # Store the mapping
-                entity_value_map[entity_value] = placeholder
-                self.mapping[entity_value] = placeholder
-                self.reverse_mapping[placeholder] = entity_value
+                entity_value_map[entity_context_key] = placeholder
                 
-                logger.debug(f"Created mapping: {entity_value} → {placeholder}")
+                # Also store in reverse mapping with context info
+                self.reverse_mapping[placeholder] = {
+                    'value': entity_value,
+                    'classification': classification
+                }
+                
+                logger.debug(f"Created mapping: {entity_value} ({classification}) → {placeholder}")
+            
+            # Store which placeholder to use at this position
+            placeholder = entity_value_map[entity_context_key]
+            entity_positions[result.start] = {
+                'placeholder': placeholder,
+                'entity_value': entity_value,
+                'end': result.end
+            }
+            
+            # Update simple mapping for backward compatibility
+            if entity_value not in self.mapping:
+                self.mapping[entity_value] = placeholder
 
-        # Now replace all occurrences in the text
+       
+        # replace all occurrences in the text
+
         anonymized_text = text
-        
+
         # Sort results by start position (REVERSE order to maintain indices)
         sorted_results = sorted(filtered_results, key=lambda x: x.start, reverse=True)
 
         for result in sorted_results:
-            entity_value = text[result.start:result.end]
-            placeholder = entity_value_map[entity_value]
-            
-            # Replace in text
-            anonymized_text = (
-                anonymized_text[:result.start] + 
-                placeholder + 
-                anonymized_text[result.end:]
-            )
+            if result.start in entity_positions:
+                pos_info = entity_positions[result.start]
+                placeholder = pos_info['placeholder']
+                
+                # Replace in text
+                anonymized_text = (
+                    anonymized_text[:result.start] + 
+                    placeholder + 
+                    anonymized_text[result.end:]
+                )
 
         # Restore titles in the anonymized text
         final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
         
         return final_text
+    
+
     
     def _preprocess_text_for_titles(self, text: str, results: List) -> List:
         
@@ -1683,18 +1711,9 @@ class ContextAwarePIIGuard:
         return adjusted_results
     
     def _restore_titles_in_anonymized_text(self, original: str, anonymized: str) -> str:
-        
+    
         TITLES_PATTERN = r'\b(Mr\.?|Mrs\.?|Ms\.?|Miss|Dr\.?|Prof\.?|Professor|Sir|Madam|Master|Rev\.?|Reverend|Hon\.?|Honorable|Shri|Smt|Kumari)\s+'
         
-        # Find all titles in original text
-        import re
-        
-        for match in re.finditer(TITLES_PATTERN, original, re.IGNORECASE):
-            title = match.group(0).strip()  # e.g., "Mr"
-            title_pos = match.start()
-            
-            pass
-
         result = anonymized
         
         # Find all PERSON placeholders
@@ -1706,7 +1725,13 @@ class ContextAwarePIIGuard:
             
             # Get the original name from mapping
             if placeholder in self.reverse_mapping:
-                original_name = self.reverse_mapping[placeholder]
+                mapping_info = self.reverse_mapping[placeholder]
+                
+                # Handle both old format (string) and new format (dict)
+                if isinstance(mapping_info, dict):
+                    original_name = mapping_info['value']
+                else:
+                    original_name = mapping_info
                 
                 # Find where this name appeared in original
                 name_positions = [m.start() for m in re.finditer(re.escape(original_name), original)]
@@ -1765,7 +1790,13 @@ class ContextAwarePIIGuard:
     
     def deanonymize(self, text: str) -> str:
         result = text
-        for placeholder, original_value in self.reverse_mapping.items():
+        for placeholder, mapping_info in self.reverse_mapping.items():
+            # Handle both old format (string) and new format (dict)
+            if isinstance(mapping_info, dict):
+                original_value = mapping_info['value']
+            else:
+                original_value = mapping_info
+            
             result = result.replace(placeholder, original_value)
             bracket_placeholder = placeholder.replace('<', '[').replace('>', ']')
             result = result.replace(bracket_placeholder, original_value)
@@ -1781,6 +1812,34 @@ class ContextAwarePIIGuard:
         # Clear redaction summary for next run
         for category in self.redaction_summary:
             self.redaction_summary[category].clear()
+    
+    def _get_semantic_placeholder(self, entity_type: str, classification: str, unique_number: int) -> str:
+        """Generate semantic placeholders based on classification"""
+        
+        # Mapping of classifications to semantic names
+        semantic_map = {
+            'EMPLOYEE_PII': 'MY',
+            'COLLEAGUE_PII': 'COLLEAGUE',
+            'CLIENT_SENSITIVE': 'CLIENT',
+            'PUBLIC_FIGURE': 'PUBLIC',
+        }
+        
+        # Get semantic prefix
+        semantic_prefix = semantic_map.get(classification, entity_type)
+        
+        # For PERSON entities, use more natural names
+        if entity_type == 'PERSON':
+            if classification == 'EMPLOYEE_PII':
+                return f"<MY_NAME>"
+            elif classification == 'COLLEAGUE_PII':
+                return f"<COLLEAGUE_{unique_number}>"
+            elif classification == 'CLIENT_SENSITIVE':
+                return f"<CLIENT_{unique_number}>"
+            else:
+                return f"<PERSON_{unique_number}>"
+        
+        # For other entities, use standard format
+        return f"<{entity_type}_{unique_number}>"
 
 # Excel/CSV Handler
 class SpreadsheetHandler:
