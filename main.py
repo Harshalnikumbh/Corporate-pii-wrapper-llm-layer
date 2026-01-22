@@ -321,11 +321,11 @@ def health():
 
 if __name__ == '__main__':
     # Print all registered routes for debugging
-    print("\n" + "="*50)
-    print("Registered Routes:")
-    print("="*50)
+    logger.info("\n" + "="*50)
+    logger.info("Registered Routes:")
+    logger.info("="*50)
     for rule in app.url_map.iter_rules():
-        print(f"{rule.endpoint:30s} {rule.rule:40s} {list(rule.methods)}")
-    print("="*50 + "\n")
-    
-    app.run(debug=True, host='0.0.0.0', port=5000)
+        logger.info(f"{rule.endpoint:30s} {rule.rule:40s} {list(rule.methods)}")
+    logger.info("="*50 + "\n")
+
+    app.run(debug=True, host='0.0.0.0', port=5000)  
