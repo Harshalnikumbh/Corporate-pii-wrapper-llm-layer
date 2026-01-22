@@ -226,61 +226,76 @@ class ContextAwareClassifier:
         
         prompt = f"""You are a CORPORATE DATA SECURITY expert analyzing text from a company employee to prevent data leaks.
 
-        CONTEXT: This is from a corporate environment. Your job is to protect:
-        - Employee personal information
-        - Client/customer data
-        - Financial information
-        - Project codes and proprietary information
+            CONTEXT: This is from a corporate environment. Your job is to protect:
+            - Employee personal information
+            - Client/customer data
+            - Financial information
+            - Project codes and proprietary information
 
-        TEXT TO ANALYZE:
-        {text}
+            TEXT TO ANALYZE:
+            {text}
 
-        DETECTED ENTITIES:
-        {chr(10).join(entity_list)}
+            DETECTED ENTITIES:
+            {chr(10).join(entity_list)}
 
-        CLASSIFY EACH ENTITY INTO ONE CATEGORY:
+            CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 
-        1. **EMPLOYEE_PII** - Employee's own sensitive information
-        - Employee's name (if "my name is X", "I am X")
-        - Employee's phone, email, address, ID numbers, salary, bank details
-        - Example: "I'm Rahul, my salary is 12 LPA" → EMPLOYEE_PII
+            1. **EMPLOYEE_PII** - Employee's own sensitive information
+            - Employee's own name when they say "I am X", "my name is X"
+            - Employee's phone, email, address, ID numbers, salary, bank details
+            - Example: "I am Rahul" → EMPLOYEE_PII
 
-        2. **CLIENT_SENSITIVE** - Client/customer/vendor information
-        - Client names (unless Fortune 500 companies)
-        - Customer contact details, addresses
-        - Project codes, engagement details
-        - Example: "Our client Rajesh from ABC Corp" → CLIENT_SENSITIVE
+            2. **CLIENT_SENSITIVE** - Client/customer/vendor information
+            - Client names (unless Fortune 500 companies)
+            - Customer contact details, addresses
+            - Example: "Our client Rajesh from ABC Corp" → CLIENT_SENSITIVE
 
-        3. **FINANCIAL_DATA** - Money-related sensitive info
-        - Bank accounts, IFSC codes, salary figures
-        - Revenue numbers, budgets, invoices
-        - Example: "Account: 1234567890" → FINANCIAL_DATA
+            3. **FINANCIAL_DATA** - Money-related sensitive info
+            - Bank accounts, IFSC codes, salary figures
+            - Revenue numbers, budgets, invoices
+            - Example: "Budget of ₹9,80,000" → FINANCIAL_DATA
 
-        4. **PUBLIC_FIGURE** - Famous people/large organizations
-        - Celebrities, politicians, CEOs of major companies
-        - Fortune 500 companies, government organizations
-        - Example: "Salman Khan" (actor), "Microsoft", "Google" → PUBLIC_FIGURE
+            4. **PROJECT_CODE** - Project identifiers
+            - Project codes like "MK-CAM9821", "PROJ-12345"
+            - Must contain mix of letters and numbers with hyphen/underscore
+            - Example: "Project MK-CAM9821" → PROJECT_CODE
 
-        5. **COLLEAGUE_PII** - Other employees/colleagues mentioned
-        - Colleague names in context like "my friend X", "my colleague Y"
-        - Example: "invite my colleague Amit" → COLLEAGUE_PII
+            5. **EMPLOYEE_ID** - Employee identification codes
+            - Employee codes like "MK-55621", "EMP-12345"
+            - Typically shorter than project codes
+            - Example: "employee code MK-55621" → EMPLOYEE_ID
 
-        6. **KEEP** - Safe to keep
-        - Generic job titles, departments
-        - Public companies in professional context
-        - Generic locations (cities, countries - not home addresses)
+            6. **PUBLIC_FIGURE** - Famous people/large organizations
+            - Celebrities, politicians, historical figures, CEOs of major companies
+            - Fortune 500 companies, government organizations
+            - Example: "Mahatma Gandhi", "Elon Musk", "Microsoft" → PUBLIC_FIGURE
 
-        CRITICAL CORPORATE RULES:
-        - "My name is Salman Khan" → Check if actor or employee (EMPLOYEE_PII if employee)
-        - "Want to dance with Akshay Kumar" → PUBLIC_FIGURE (famous actor)
-        - "My friend Amit" → COLLEAGUE_PII (redact)
-        - Client names (unless huge companies) → CLIENT_SENSITIVE
-        - ANY bank account, salary, address → Always redact
-        - Project codes, employee IDs → Always redact
-        - "Microsoft" in work context → KEEP if discussing company, CLIENT_SENSITIVE if it's your client
+            7. **COLLEAGUE_PII** - Other employees/colleagues mentioned
+            - Colleague names in context like "my friend X", "my colleague Y"
+            - Example: "invite my colleague Amit" → COLLEAGUE_PII
 
-        Respond ONLY with JSON mapping entity number to classification:
-        {{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
+            8. **KEEP** - Safe to keep
+            - Generic job titles, departments
+            - Public companies in professional context
+            - Generic locations (cities, countries - not home addresses)
+
+            CRITICAL CORPORATE RULES:
+            - "I am Ankit Verma" → EMPLOYEE_PII (employee's own name)
+            - "Our client Rajiv Mehra" → CLIENT_SENSITIVE (redact client names)
+            - "employee code MK-55621" → EMPLOYEE_ID (employee ID, short format)
+            - "Project MK-CAM9821" → PROJECT_CODE (project code, longer/mixed format)
+            - "Budget of ₹9,80,000" → FINANCIAL_DATA (always redact money)
+            - "Mahatma Gandhi", "Elon Musk" → PUBLIC_FIGURE (famous people, keep)
+            - Email like "ankit.verma@marketpro.in" → EMPLOYEE_PII (employee's email)
+            - Phone like "+91 9988776655" → EMPLOYEE_PII (employee's phone)
+
+            DISTINGUISH EMPLOYEE_ID vs PROJECT_CODE:
+            - EMPLOYEE_ID: Shorter, simpler (e.g., "MK-55621", "EMP-1234")
+            - PROJECT_CODE: Longer, more complex (e.g., "MK-CAM9821", "PROJ-XYZ-001")
+            - If in doubt and has "Project" keyword → PROJECT_CODE
+
+            Respond ONLY with JSON mapping entity number to classification:
+            {{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
 
         try:
             response = self.groq_client.chat.completions.create(
@@ -1232,8 +1247,7 @@ class CorporatePIIRecognizers:
     @staticmethod
     def create_bank_account_recognizer():
         patterns = [
-            Pattern("Bank Account", r"\b\d{9,18}\b", 0.75),  # Indian accounts
-            Pattern("IFSC", r"\b[A-Z]{4}0[A-Z0-9]{6}\b", 0.95),  # IFSC codes
+            Pattern("Bank Account", r"\b\d{9,18}\b", 0.75),  # Indian account numbers
             Pattern("SWIFT", r"\b[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?\b", 0.9),  # SWIFT codes
         ]
         return PatternRecognizer(
@@ -1241,18 +1255,28 @@ class CorporatePIIRecognizers:
             patterns=patterns,
             context=["account", "bank", "ifsc", "swift", "a/c", "account number"]
         )
+    @staticmethod
+    def create_ifsc_recognizer():
+        patterns = [
+        Pattern("IFSC", r"\b[A-Z]{4}0[A-Z0-9]{6}\b", 0.95),
+    ]
+        return PatternRecognizer(
+            supported_entity="IFSC_CODE",
+            patterns=patterns,
+            context=["ifsc", "ifsc code"]
+        )
     
     @staticmethod
     def create_employee_id_recognizer():
         patterns = [
             Pattern("Employee ID", r"\bEMP[-_]?\d{4,8}\b", 0.9),
-            Pattern("Employee ID", r"\b[A-Z]{2,4}\d{4,6}\b", 0.7),  # Generic EMP123456
+            Pattern("Employee ID", r"\b[A-Z]{2,4}[-_]\d{4,6}\b", 0.85),
             Pattern("Employee ID", r"\bSTAFF[-_]?\d{4,8}\b", 0.85),
         ]
         return PatternRecognizer(
             supported_entity="EMPLOYEE_ID",
             patterns=patterns,
-            context=["employee", "emp", "staff", "id", "badge"]
+            context=["employee", "emp", "staff", "id", "badge", "code"]
         )
     
     @staticmethod
@@ -1283,12 +1307,13 @@ class CorporatePIIRecognizers:
     def create_project_code_recognizer():
         patterns = [
             Pattern("Project Code", r"\bPROJ[-_]?[A-Z0-9]{4,10}\b", 0.85),
-            Pattern("Project Code", r"\b[A-Z]{2,4}[-_]\d{3,6}\b", 0.7),
+            Pattern("Project Code", r"\b[A-Z]{2,4}[-_][A-Z]{3,6}\d{3,6}\b", 0.85),  
+            Pattern("Project Code", r"\bProject\s+[A-Z]{2,4}[-_][A-Z0-9]{4,10}\b", 0.9),  
         ]
         return PatternRecognizer(
             supported_entity="PROJECT_CODE",
             patterns=patterns,
-            context=["project", "proj", "code", "engagement"]
+            context=["project", "proj", "code", "engagement", "initiative"]
         )
     
     @staticmethod
@@ -1340,6 +1365,7 @@ class ContextAwarePIIGuard:
 
         # Corporate PII
         registry.add_recognizer(CorporatePIIRecognizers.create_bank_account_recognizer())
+        registry.add_recognizer(CorporatePIIRecognizers.create_ifsc_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_employee_id_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_salary_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_passport_recognizer())
@@ -1369,11 +1395,12 @@ class ContextAwarePIIGuard:
         'FINANCIAL_DATA': [],
         'COLLEAGUE_PII': [],
         'BANK_ACCOUNT': [],
+        'IFSC_CODE': [],
         'SALARY_INFO': [],
         'EMPLOYEE_ID': [],
         'PROJECT_CODE': [],
         'HOME_ADDRESS': [],
-        'PASSPORT': []
+        'PASSPORT': [],
     }
     
     def classify_pii_intent(self, text: str) -> Dict:
@@ -1463,16 +1490,16 @@ class ContextAwarePIIGuard:
         intent_decision = self.classify_pii_intent(text)
         if intent_decision["intent"] == PIIUsageIntent.COMPUTATION_ALLOWED.value:
             logger.info(
-            f"PII allowed for computation — skipping redaction. Reason: {intent_decision['reason']}"
-        )
+                f"PII allowed for computation — skipping redaction. Reason: {intent_decision['reason']}"
+            )
             return text
+        
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
 
         self.mapping.clear()
         self.reverse_mapping.clear()
         self.kept_entities.clear()
-        
         
         if not results:
             return text
@@ -1511,7 +1538,7 @@ class ContextAwarePIIGuard:
             
             # Redact USER_PII and THIRD_PARTY_PII
             if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                      'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII']:
+                    'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
                 logger.info(f"REDACTING: {entity_text} - {classification}")
                 filtered_results.append(result)
 
@@ -1526,27 +1553,48 @@ class ContextAwarePIIGuard:
         if not filtered_results:
             return text
         
-        # Anonymize filtered results
-        operators = {}
-        counters = {}
-        
+        # CORRECTED: Build unique entity mapping FIRST
+        entity_value_map = {}  # Maps entity_value -> unique placeholder
+        global_counters = {}   # Counter per entity type
+
         for result in filtered_results:
             entity_type = result.entity_type
-            counters[entity_type] = counters.get(entity_type, 0) + 1
-            placeholder = f"<{entity_type}_{counters[entity_type]}>"
-            operators[entity_type] = OperatorConfig("replace", {"new_value": placeholder})
-        
-        anonymized_result = self.anonymizer.anonymize(
-            text=text,
-            analyzer_results=filtered_results,
-            operators=operators
-        )
-        
-        self._build_mapping(text, anonymized_result.text, filtered_results)
+            entity_value = text[result.start:result.end]
+            
+            #  reuse its placeholder
+            if entity_value not in entity_value_map:
+                # First time seeing this entity value, assign new number
+                global_counters[entity_type] = global_counters.get(entity_type, 0) + 1
+                unique_number = global_counters[entity_type]
+                placeholder = f"<{entity_type}_{unique_number}>"
+                
+                # Store the mapping
+                entity_value_map[entity_value] = placeholder
+                self.mapping[entity_value] = placeholder
+                self.reverse_mapping[placeholder] = entity_value
+                
+                logger.debug(f"Created mapping: {entity_value} → {placeholder}")
 
-        final_text = self._restore_titles_in_anonymized_text(text, anonymized_result.text)
+        # Now replace all occurrences in the text
+        anonymized_text = text
         
-        # return anonymized_result.text
+        # Sort results by start position (REVERSE order to maintain indices)
+        sorted_results = sorted(filtered_results, key=lambda x: x.start, reverse=True)
+
+        for result in sorted_results:
+            entity_value = text[result.start:result.end]
+            placeholder = entity_value_map[entity_value]
+            
+            # Replace in text
+            anonymized_text = (
+                anonymized_text[:result.start] + 
+                placeholder + 
+                anonymized_text[result.end:]
+            )
+
+        # Restore titles in the anonymized text
+        final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
+        
         return final_text
     
     def _preprocess_text_for_titles(self, text: str, results: List) -> List:
@@ -1685,17 +1733,35 @@ class ContextAwarePIIGuard:
         return result
 
     def _build_mapping(self, original: str, anonymized: str, results):
-        for result in results:
-            original_value = original[result.start:result.end]
-            pattern = f"<{result.entity_type}_\\d+>"
-            matches = list(re.finditer(pattern, anonymized))
+        """Build mapping ensuring unique placeholders for unique entities"""
+        # entity_counters = {}  # Track unique counter per entity value
+        
+        # for result in results:
+        #     original_value = original[result.start:result.end]
+        #     entity_type = result.entity_type
             
-            for match in matches:
-                placeholder = match.group()
-                if placeholder not in self.reverse_mapping:
-                    self.reverse_mapping[placeholder] = original_value
-                    self.mapping[original_value] = placeholder
-                    break
+        #     # Check if this exact value already has a placeholder
+        #     if original_value in self.mapping:
+        #         # Already mapped, skip
+        #         continue
+            
+        #     # Find the corresponding placeholder in anonymized text
+        #     pattern = f"<{entity_type}_\\d+>"
+        #     matches = list(re.finditer(pattern, anonymized))
+            
+        #     for match in matches:
+        #         placeholder = match.group()
+                
+        #         # If this placeholder is already used, skip it
+        #         if placeholder in self.reverse_mapping:
+        #             continue
+                
+        #         # Assign this placeholder to the original value
+        #         self.reverse_mapping[placeholder] = original_value
+        #         self.mapping[original_value] = placeholder
+                
+        #         logger.debug(f"Mapped: {original_value} → {placeholder}")
+        pass
     
     def deanonymize(self, text: str) -> str:
         result = text
@@ -2295,9 +2361,43 @@ class GroqClient:
         self.model = model
     
     def generate(self, prompt: str) -> str:
+        """
+        Generate response while preserving PII placeholders.
+        """
+        # Add system instruction to preserve placeholders
+        system_message = {
+            "role": "system",
+            "content": """You are a helpful AI assistant. 
+
+            CRITICAL INSTRUCTION: The user's message may contain placeholders like <PERSON_1>, <EMAIL_ADDRESS_1>, <EMPLOYEE_ID_1>, <PROJECT_CODE_1>, <PHONE_NUMBER_1>, <ORGANIZATION_1>, etc.
+
+            **YOU MUST PRESERVE THESE PLACEHOLDERS EXACTLY AS THEY APPEAR IN YOUR RESPONSE.**
+
+            DO NOT:
+            - Replace placeholders with made-up names, numbers, or data
+            - Remove placeholders
+            - Change the placeholder format
+
+            DO:
+            - Keep all placeholders like <PERSON_1>, <EMAIL_ADDRESS_1> exactly as shown
+            - Use the same placeholder if referring to the same entity multiple times
+            - Respond naturally while maintaining all placeholders
+
+            Example:
+            User: "Hello, I am <PERSON_1>. My email is <EMAIL_ADDRESS_1>. Please write a formal introduction."
+            Correct Response: "Dear Team, I am pleased to introduce <PERSON_1>, who can be reached at <EMAIL_ADDRESS_1>."
+            Wrong Response: "Dear Team, I am pleased to introduce John Smith, who can be reached at john@example.com."
+            """
+        }
+        
+        user_message = {
+            "role": "user",
+            "content": prompt
+        }
+        
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[system_message, user_message],
             temperature=0.7,
             max_tokens=1024
         )
