@@ -1,4 +1,3 @@
-from email.mime import text
 import os
 import re
 import sys
@@ -30,7 +29,7 @@ def retry_on_failure(max_retries=3, delay=1):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
+            for attempt in range(max_retries):   
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
@@ -1463,8 +1462,7 @@ class ContextAwarePIIGuard:
         prompt = f"""
     You are a DATA GOVERNANCE AI.
 
-    Determine if personal data in the user prompt is REQUIRED
-    to answer the user's request.
+    Determine if personal data in the user prompt is REQUIRED to answer the user's request.
 
     Text:
     {text}
@@ -1472,28 +1470,35 @@ class ContextAwarePIIGuard:
     Allowed intents:
 
     1. COMPUTATION_ALLOWED
-    - Age calculation
-    - Date difference
-    - Eligibility checks
+    - Age calculation from DOB
+    - Date difference calculations
+    - Eligibility checks using personal data
+    - Statistical queries
     Example: "My DOB is 04/10/2006, tell me my age"
 
     2. TRANSFORMATION_ALLOWED
-    - Formatting
-    - Translation
-    - Masking requested by user
+    - Asking about name meanings ("What does the name Harshal mean?")
+    - Name formatting/translation
+    - Linguistic queries about words that happen to be names
+    - Cultural/etymological questions
+    Example: "Tell me the meaning of the name Priya"
 
     3. REDACTION_REQUIRED
-    - Casual mention of DOB, phone, address
-    - Sensitive data not required to answer
+    - Casual mention of PII not needed for the task
+    - Sensitive data in context (emails, phones, addresses)
+    - Identity documents
+    - Default for uncertain cases
 
-    Rules:
-    - If removing the data breaks the task → COMPUTATION_ALLOWED
-    - Default to REDACTION_REQUIRED if unsure
+    🔥 CRITICAL RULES:
+    - If the query is ABOUT a name/word itself (not a person) → TRANSFORMATION_ALLOWED
+    - If removing the data breaks the task logic → COMPUTATION_ALLOWED
+    - If the data is just mentioned casually → REDACTION_REQUIRED
+    - When in doubt → REDACTION_REQUIRED
 
     Respond ONLY in JSON:
     {{
     "intent": "COMPUTATION_ALLOWED | TRANSFORMATION_ALLOWED | REDACTION_REQUIRED",
-    "reason": "short reason"
+    "reason": "brief explanation in 10 words"
     }}
     """
         try:
@@ -1515,7 +1520,7 @@ class ContextAwarePIIGuard:
 
         return {
             "intent": PIIUsageIntent.REDACTION_REQUIRED.value,
-            "reason": "fallback"
+            "reason": "fallback - classification error"
         }
     
 
@@ -2664,33 +2669,73 @@ class IntelligentPIIPipeline:
         )
     
     def process_text(self, text: str, verbose: bool = True) -> Dict:
-        """Process text with context-aware redaction"""
+        """Process text with intent-aware redaction (FIXED VERSION)"""
         try:
             if verbose:
                 logger.info("="*80)
                 logger.info("PROCESSING TEXT WITH CONTEXT AWARENESS")
                 logger.info("="*80)
             
-            anonymized = self.pii_guard.anonymize(text, context_aware=True)
+            # ========== STEP 1: CLASSIFY INTENT ==========
+            # 🔥 FIX: Call through self.pii_guard (not self)
+            intent_decision = self.pii_guard.classify_pii_intent(text)
+            intent = intent_decision["intent"]
+            reason = intent_decision["reason"]
             
+            logger.info(f"🧠 Intent Classification: {intent}")
+            logger.info(f"📌 Reason: {reason}")
+            
+            # ========== STEP 2: DECIDE REDACTION STRATEGY ==========
+            
+            # Case A: PII needed for computation (age calculation, eligibility)
+            if intent == PIIUsageIntent.COMPUTATION_ALLOWED.value:
+                logger.info("✓ PII required for computation - sending as-is to LLM")
+                anonymized = text  # No redaction
+                skip_redaction = True
+            
+            # Case B: PII needed for transformation (name meaning, formatting)
+            elif intent == PIIUsageIntent.TRANSFORMATION_ALLOWED.value:
+                logger.info("✓ PII is linguistic/transformation query - keeping entities")
+                anonymized = text  # No redaction
+                skip_redaction = True
+            
+            # Case C: Default - redact sensitive PII
+            else:
+                logger.info("⚠ Redacting sensitive PII")
+                anonymized = self.pii_guard.anonymize(text, context_aware=True)
+                skip_redaction = False
+            
+            # ========== STEP 3: CALL LLM ==========
             if verbose:
-                logger.info("Generating LLM response...")
+                logger.info(f"Sending to LLM: {anonymized}")
             
             llm_response = self.llm_client.generate(anonymized)
-            final_response = self.pii_guard.deanonymize(llm_response)
             
+            # ========== STEP 4: DEANONYMIZE (only if redaction happened) ==========
+            if skip_redaction:
+                final_response = llm_response  # No placeholders to restore
+            else:
+                final_response = self.pii_guard.deanonymize(llm_response)
+            
+            # ========== STEP 5: BUILD RESULT ==========
             result = {
                 'type': 'text',
                 'original': text,
                 'anonymized': anonymized,
                 'llm_response_anonymized': llm_response,
                 'final_response': final_response,
-                'redacted_entities': dict(self.pii_guard.reverse_mapping),
+                'intent_classification': {
+                    'intent': intent,
+                    'reason': reason,
+                    'redaction_applied': not skip_redaction
+                },
+                'redacted_entities': dict(self.pii_guard.reverse_mapping) if not skip_redaction else {},
                 'kept_entities': list(self.pii_guard.kept_entities),
-                'redaction_report': self.pii_guard.get_redaction_report(),
+                'redaction_report': self.pii_guard.get_redaction_report() if not skip_redaction else {},
                 'timestamp': datetime.now().isoformat()
             }
             
+            # ========== STEP 6: LOGGING ==========
             if verbose:
                 logger.info("="*80)
                 logger.info("RESULTS")
@@ -2698,8 +2743,12 @@ class IntelligentPIIPipeline:
                 logger.info(f"ORIGINAL: {text}")
                 logger.info(f"ANONYMIZED: {anonymized}")
                 logger.info(f"RESPONSE: {final_response}")
-                logger.info(f"REDACTED: {len(self.pii_guard.reverse_mapping)} entities")
-                logger.info(f"KEPT: {len(self.pii_guard.kept_entities)} public figures")
+                logger.info(f"INTENT: {intent}")
+                logger.info(f"REDACTION APPLIED: {not skip_redaction}")
+                if not skip_redaction:
+                    logger.info(f"REDACTED: {len(self.pii_guard.reverse_mapping)} entities")
+                    logger.info(f"KEPT: {len(self.pii_guard.kept_entities)} public figures")
+                logger.info("="*80)
             
             return result
             
@@ -2897,4 +2946,4 @@ if __name__ == "__main__":
     if not config.groq_api_key:
         logger.error("GROQ_API_KEY not set in environment!")
         logger.error("Set it using: export GROQ_API_KEY='your-key'")
-    main()  
+    main()          
