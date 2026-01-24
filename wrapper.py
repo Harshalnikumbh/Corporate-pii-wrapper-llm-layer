@@ -1,3 +1,4 @@
+from email.mime import text
 import os
 import re
 import sys
@@ -221,9 +222,16 @@ class ContextAwareClassifier:
         
         # Build entity list for LLM
         entity_list = []
+        # Maps lowercase -> original case
+        entity_case_map = {}
         for idx, entity in enumerate(detected_entities):
-            entity_list.append(f"{idx+1}. '{entity['text']}' (Type: {entity['type']})")
-        
+            entity_text = entity['text']
+            entity_text_lower = entity_text.lower()
+
+            if entity_text_lower not in entity_case_map:
+                entity_case_map[entity_text_lower] = entity_text
+            entity_list.append(f"{len(entity_case_map)}. '{entity_text}' (Type: {entity['type']})")
+
         prompt = f"""You are a CORPORATE DATA SECURITY expert analyzing text from a company employee to prevent data leaks.
 
             CONTEXT: This is from a corporate environment. Your job is to protect:
@@ -240,63 +248,57 @@ class ContextAwareClassifier:
 
             CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 
-            1. **EMPLOYEE_PII** - Employee's own sensitive information
-            - Employee's own name when they say "I am X", "my name is X"
+            1. **EMPLOYEE_PII** - Employee's own sensitive information [CHECK FIRST FOR "I am", "My name is"]
+            - **IF THE TEXT CONTAINS "I am [NAME]" OR "My name is [NAME]" → THAT NAME IS EMPLOYEE_PII**
             - Employee's phone, email, address, ID numbers, salary, bank details
-            - Example: "I am Rahul" → EMPLOYEE_PII
+            - Employee's own employee ID (e.g., "My employee id is EMP-55621")
+            - Examples:
+            * "I am roHiT sHArMa" → roHiT sHArMa is EMPLOYEE_PII
+            * "My employee id is EMP-55621" → EMP-55621 is EMPLOYEE_PII
+            * "My email is rohit@company.com" → EMPLOYEE_PII
 
             2. **CLIENT_SENSITIVE** - Client/customer/vendor information
-            - Client names (unless Fortune 500 companies)
-            - Customer contact details, addresses
-            - Example: "Our client Rajesh from ABC Corp" → CLIENT_SENSITIVE
+            - **IF THE TEXT CONTAINS "Our client [NAME]" OR "Client: [NAME]" → THAT NAME IS CLIENT_SENSITIVE**
+            - Customer contact details, addresses, account numbers
+            - Small/medium business names that are not publicly famous
+            - Examples:
+            * "Our client Ankit Verma" → Ankit Verma is CLIENT_SENSITIVE
+            * "Client account 123456" → CLIENT_SENSITIVE
 
-            3. **FINANCIAL_DATA** - Money-related sensitive info
-            - Bank accounts, IFSC codes, salary figures
-            - Revenue numbers, budgets, invoices
-            - Example: "Budget of ₹9,80,000" → FINANCIAL_DATA
+            3. **PUBLIC_FIGURE** - Famous people/large organizations
+            - Celebrities, politicians, tech leaders (Elon Musk, Bill Gates, etc.)
+            - Fortune 500 companies (Google, Microsoft, Tesla, Apple, Amazon)
+            - Historical figures
+            - **IF globally famous → PUBLIC_FIGURE**
+            - Examples: "Elon Musk" → PUBLIC_FIGURE, "Google" → PUBLIC_FIGURE
 
-            4. **PROJECT_CODE** - Project identifiers
-            - Project codes like "MK-CAM9821", "PROJ-12345"
-            - Must contain mix of letters and numbers with hyphen/underscore
-            - Example: "Project MK-CAM9821" → PROJECT_CODE
+            4. **FINANCIAL_DATA** - Money-related sensitive info
+            - Bank accounts, IFSC codes, salary, revenue
+            - Examples: "account number 998877665544" → FINANCIAL_DATA
 
             5. **EMPLOYEE_ID** - Employee identification codes
-            - Employee codes like "MK-55621", "EMP-12345"
-            - Typically shorter than project codes
-            - Example: "employee code MK-55621" → EMPLOYEE_ID
+            - Codes like "EMP-55621", "STAFF-12345"
+            - **IF context says "employee id" → EMPLOYEE_ID**
 
-            6. **PUBLIC_FIGURE** - Famous people/large organizations
-            - Celebrities, politicians, historical figures, CEOs of major companies
-            - Fortune 500 companies, government organizations
-            - Example: "Mahatma Gandhi", "Elon Musk", "Microsoft" → PUBLIC_FIGURE
+            6. **PROJECT_CODE** - Project identifiers
+            - "PROJ-12345", "MK-CAM9821"
 
             7. **COLLEAGUE_PII** - Other employees/colleagues mentioned
-            - Colleague names in context like "my friend X", "my colleague Y"
-            - Example: "invite my colleague Amit" → COLLEAGUE_PII
+            - NOT the speaker, but other employees
+            - Example: "my colleague Amit" → COLLEAGUE_PII
 
-            8. **KEEP** - Safe to keep
-            - Generic job titles, departments
-            - Public companies in professional context
-            - Generic locations (cities, countries - not home addresses)
+            8. **KEEP** - Safe generic terms
+            - Job titles, cities, countries
 
-            CRITICAL CORPORATE RULES:
-            - "I am Ankit Verma" → EMPLOYEE_PII (employee's own name)
-            - "Our client Rajiv Mehra" → CLIENT_SENSITIVE (redact client names)
-            - "employee code MK-55621" → EMPLOYEE_ID (employee ID, short format)
-            - "Project MK-CAM9821" → PROJECT_CODE (project code, longer/mixed format)
-            - "Budget of ₹9,80,000" → FINANCIAL_DATA (always redact money)
-            - "Mahatma Gandhi", "Elon Musk" → PUBLIC_FIGURE (famous people, keep)
-            - Email like "ankit.verma@marketpro.in" → EMPLOYEE_PII (employee's email)
-            - Phone like "+91 9988776655" → EMPLOYEE_PII (employee's phone)
+            CRITICAL DECISION RULES:
+            1. Check "I am [NAME]" → NAME = EMPLOYEE_PII
+            2. Check "Our client [NAME]" → NAME = CLIENT_SENSITIVE  
+            3. Check if famous → PUBLIC_FIGURE
+            4. Check "employee id" context → EMPLOYEE_ID
+            5. Default to KEEP if unsure
 
-            DISTINGUISH EMPLOYEE_ID vs PROJECT_CODE:
-            - EMPLOYEE_ID: Shorter, simpler (e.g., "MK-55621", "EMP-1234")
-            - PROJECT_CODE: Longer, more complex (e.g., "MK-CAM9821", "PROJ-XYZ-001")
-            - If in doubt and has "Project" keyword → PROJECT_CODE
-
-            Respond ONLY with JSON mapping entity number to classification:
-            {{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
-
+Respond ONLY with JSON:
+{{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
         try:
             response = self.groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -336,6 +338,33 @@ class PublicEntityVerifier:
         self.cache = set()
         self.cache_file = "public_entities_cache.json"
         self._load_cache()
+
+        self._prepopulate_common_public_entities()
+    
+    def _prepopulate_common_public_entities(self):
+        common_public_entities = {
+        # Tech CEOs
+        'elon musk', 'bill gates', 'jeff bezos', 'mark zuckerberg', 'sundar pichai',
+        'satya nadella', 'tim cook', 'larry page', 'sergey brin',
+        
+        # Companies
+        'tesla', 'microsoft', 'google', 'apple', 'amazon', 'meta', 'facebook',
+        'netflix', 'twitter', 'spacex', 'nvidia', 'intel', 'ibm',
+        
+        # Historical/Political Figures
+        'mahatma gandhi', 'nelson mandela', 'abraham lincoln', 'martin luther king',
+        'albert einstein', 'steve jobs', 'narendra modi', 'joe biden',
+        
+        # Celebrities
+        'shah rukh khan', 'amitabh bachchan', 'virat kohli', 'sachin tendulkar',
+    }
+    
+        self.cache.update(common_public_entities)
+        logger.info(f"Pre-populated cache with {len(common_public_entities)} known public entities")
+
+        for entity in common_public_entities:
+            self.cache.add(entity.lower())
+        self._save_cache()
     
     def _load_cache(self):
         if os.path.exists(self.cache_file):
@@ -1223,14 +1252,30 @@ class IndianPIIRecognizers:
     @staticmethod
     def create_indian_phone_recognizer():
         patterns = [
-            Pattern("Indian Phone", r"\b(?:\+91|91)?[\s-]?[6-9]\d{9}\b", 0.9),
+            # Match +91 with space: "+91 8080954638"
+            Pattern("Indian Phone", r"\+91\s+[6-9]\d{9}\b", 0.95),
+            
+            # Match +91 without space: "+918080954638"  
+            Pattern("Indian Phone", r"\+91[6-9]\d{9}\b", 0.95),
+            
+            # Match 91 with space: "91 8080954638"
+            Pattern("Indian Phone", r"(?<!\d)91\s+[6-9]\d{9}\b", 0.9),
+            
+            # Match 91 without space: "918080954638"
+            Pattern("Indian Phone", r"(?<!\d)91[6-9]\d{9}\b", 0.9),
+            
+            # Match without country code: "8080954638"
+            Pattern("Indian Phone", r"\b[6-9]\d{9}\b", 0.85),
+            
+            # Match with hyphens/dashes in various formats
+            Pattern("Indian Phone", r"\+91[\s-][6-9]\d{4}[\s-]?\d{5}\b", 0.9),
+            Pattern("Indian Phone", r"(?<!\d)91[\s-][6-9]\d{4}[\s-]?\d{5}\b", 0.88),
         ]
         return PatternRecognizer(
             supported_entity="INDIAN_PHONE",
             patterns=patterns,
-            context=["phone", "mobile", "contact", "whatsapp", "call"]
+            context=["phone", "mobile", "contact", "whatsapp", "call", "number", "tel"]
         )
-    
     @staticmethod
     def create_indian_pincode_recognizer():
         patterns = [
@@ -1269,14 +1314,22 @@ class CorporatePIIRecognizers:
     @staticmethod
     def create_employee_id_recognizer():
         patterns = [
-            Pattern("Employee ID", r"\bEMP[-_]?\d{4,8}\b", 0.9),
+            # EMP-12345, emp-12345 (case insensitive)
+            Pattern("Employee ID", r"\b(?:EMP|emp)[-_]?\d{4,8}\b", 0.95),
+            
+            # STAFF-12345, staff-12345
+            Pattern("Employee ID", r"\b(?:STAFF|staff)[-_]?\d{4,8}\b", 0.95),
+            
+            # Generic: ABC-12345 or XYZ_123456
             Pattern("Employee ID", r"\b[A-Z]{2,4}[-_]\d{4,6}\b", 0.85),
-            Pattern("Employee ID", r"\bSTAFF[-_]?\d{4,8}\b", 0.85),
+            
+            # ID: 12345678 (with context)
+            Pattern("Employee ID", r"\b\d{6,8}\b", 0.75),
         ]
         return PatternRecognizer(
             supported_entity="EMPLOYEE_ID",
             patterns=patterns,
-            context=["employee", "emp", "staff", "id", "badge", "code"]
+            context=["employee id", "emp id", "staff id", "employee", "emp", "staff", "id", "badge", "code"]
         )
     
     @staticmethod
@@ -1498,6 +1551,28 @@ class ContextAwarePIIGuard:
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
 
+        if not any (r.entity_type == 'PERSON' for r in results):
+            normalized_text = text.title()
+            normalized_results = self.analyzer.analyze(text=normalized_text, language=self.language)
+            for result in normalized_results:
+                if result.entity_type == 'PERSON':
+                    # Verify this entity exists in original text (case-insensitive)
+                    entity_text_normalized = normalized_text[result.start:result.end]
+                    
+                    # Find in original text
+                    pattern = re.compile(re.escape(entity_text_normalized), re.IGNORECASE)
+                    for match in pattern.finditer(text):
+                        # Create new result with original position
+                        from presidio_analyzer import RecognizerResult
+                        new_result = RecognizerResult(
+                            entity_type='PERSON',
+                            start=match.start(),
+                            end=match.end(),
+                            score=result.score
+                        )
+                        results.append(new_result)
+                        logger.info(f"✓ Detected mixed-case PERSON: {text[match.start():match.end()]}")
+
         self.mapping.clear()
         self.reverse_mapping.clear()
         self.kept_entities.clear()
@@ -1518,18 +1593,34 @@ class ContextAwarePIIGuard:
                 'end': result.end,
                 'score': result.score
             })
+        detected_entities = self._remove_overlapping_entities(detected_entities)
         
         # Classify entities based on context
         if context_aware:
             classifications = self.context_classifier.classify_entities_in_context(text, detected_entities)
+            for entity in detected_entities:
+                if entity['type'] == 'PERSON':
+                    entity_text = entity['text']
+                    current_classification = classifications.get(entity_text, 'KEEP')
+
+                    if current_classification not in ['PUBLIC_FIGURE', 'KEEP']:
+                        if self.public_verifier.is_public_figure(entity_text):
+                            classifications[entity_text] = 'PUBLIC_FIGURE'
+                            logger.info(f"✓ Verified as PUBLIC_FIGURE: {entity_text}")
+
         else:
             classifications = {e['text']: 'USER_PII' for e in detected_entities}
-        
+
         # Filter results based on classification
         filtered_results = []
+        classifications_lower = {k.lower(): v for k, v in classifications.items()}
         for result in results:
             entity_text = text[result.start:result.end]
-            classification = classifications.get(entity_text, 'KEEP')
+            classification = classifications.get(entity_text)
+            if classification is None:
+                classification = classifications_lower.get(entity_text.lower(), 'KEEP')
+
+            logger.debug(f"Entity: '{entity_text}' | Type: {result.entity_type} | Classification: {classification}")
             
             # Keep public figures and entities marked as KEEP
             if classification in ['PUBLIC_FIGURE', 'KEEP']:
@@ -1553,6 +1644,8 @@ class ContextAwarePIIGuard:
         
         if not filtered_results:
             return text
+        
+
     
         # CONTEXT-AWARE: Build unique entity mapping with classification
        
@@ -1560,10 +1653,26 @@ class ContextAwarePIIGuard:
         global_counters = {}   # Counter per entity type
         entity_positions = {}  # Track which placeholder to use for each position
 
+        processed_spans = []
+
         for result in filtered_results:
+            is_overlap = False
+            for (proc_start, proc_end) in processed_spans:
+                # Check if there's ANY overlap
+                if result.start < proc_end and result.end > proc_start:
+                    is_overlap = True
+                    entity_text = text[result.start:result.end]
+                    logger.debug(f"Skipping overlapping entity: '{entity_text}' "
+                                f"at ({result.start}-{result.end}), conflicts with ({proc_start}-{proc_end})")
+                    break
+            if is_overlap:
+                continue
+
             entity_type = result.entity_type
             entity_value = text[result.start:result.end]
             classification = classifications.get(entity_value, 'KEEP')
+            # Mark this span as processed
+            processed_spans.append((result.start, result.end))
             
             # Create a unique key combining entity value AND its classification context
             entity_context_key = (entity_value, classification)
@@ -1598,32 +1707,99 @@ class ContextAwarePIIGuard:
             if entity_value not in self.mapping:
                 self.mapping[entity_value] = placeholder
 
-       
-        # replace all occurrences in the text
-
+        # Replace all occurrences in the text
         anonymized_text = text
 
         # Sort results by start position (REVERSE order to maintain indices)
         sorted_results = sorted(filtered_results, key=lambda x: x.start, reverse=True)
 
+        # Track already replaced positions to avoid duplicates
+        replaced_positions = set()
+
         for result in sorted_results:
+            # Skip if this position was already replaced
+            if result.start in replaced_positions:
+                logger.debug(f"Skipping duplicate replacement at position {result.start}")
+                continue
+            
             if result.start in entity_positions:
                 pos_info = entity_positions[result.start]
                 placeholder = pos_info['placeholder']
                 
-                # Replace in text
-                anonymized_text = (
-                    anonymized_text[:result.start] + 
-                    placeholder + 
-                    anonymized_text[result.end:]
-                )
+                # Verify the text at this position matches what we expect
+                actual_text = anonymized_text[result.start:result.end]
+                expected_text = pos_info['entity_value']
+                
+                # CASE-INSENSITIVE comparison for emails and case-sensitive for others
+                texts_match = False
+                if result.entity_type == 'EMAIL_ADDRESS':
+                    # Case-insensitive match for emails
+                    texts_match = (actual_text.lower() == expected_text.lower())
+                else:
+                    # Exact match for other entities
+                    texts_match = (actual_text == expected_text)
+                
+                if texts_match:
+                    # Replace in text
+                    anonymized_text = (
+                        anonymized_text[:result.start] + 
+                        placeholder + 
+                        anonymized_text[result.end:]
+                    )
+                    
+                    # Mark this position as replaced
+                    replaced_positions.add(result.start)
+                    
+                    logger.debug(f"Replaced '{expected_text}' with '{placeholder}' at position {result.start}")
+                else:
+                    logger.warning(f"Text mismatch at {result.start}: expected '{expected_text}', found '{actual_text}'")
+                    logger.warning(f"Entity type: {result.entity_type}")
 
-        # Restore titles in the anonymized text
-        final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
+                # Restore titles in the anonymized text
+                final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
+                
+                return final_text
+            
+    def _remove_overlapping_entities(self, entities: List[Dict]) -> List[Dict]:
+        """Remove overlapping entities, keeping higher confidence ones"""
+        if not entities:
+            return entities
         
-        return final_text
-    
-
+        # Sort by start position, then by length (longer first), then by score (higher first)
+        sorted_entities = sorted(entities, key=lambda e: (e['start'], -(e['end'] - e['start']), -e['score']))
+        
+        filtered = []
+        
+        for entity in sorted_entities:
+            # Check if this entity overlaps with any already accepted entity
+            overlaps = False
+            
+            for accepted in filtered:
+                # Check for overlap
+                if not (entity['end'] <= accepted['start'] or entity['start'] >= accepted['end']):
+                    overlaps = True
+                    
+                    # Priority list: EMAIL, PHONE, AADHAAR, etc. should not be overridden
+                    priority_types = ['EMAIL_ADDRESS', 'INDIAN_PHONE', 'AADHAAR_NUMBER', 
+                                    'PAN_NUMBER', 'PASSPORT', 'EMPLOYEE_ID', 'IFSC_CODE']
+                    
+                    # If the accepted entity is high priority, skip this one
+                    if accepted['type'] in priority_types:
+                        logger.debug(f"Skipping '{entity['text']}' - overlaps with priority entity '{accepted['text']}'")
+                        break
+                    
+                    # If this entity is higher priority, remove the accepted one
+                    if entity['type'] in priority_types and accepted['type'] not in priority_types:
+                        logger.debug(f"Replacing '{accepted['text']}' with priority entity '{entity['text']}'")
+                        filtered.remove(accepted)
+                        overlaps = False
+                        break
+            
+            if not overlaps:
+                filtered.append(entity)
+        
+        # Sort back by start position for processing
+        return sorted(filtered, key=lambda e: e['start'])
     
     def _preprocess_text_for_titles(self, text: str, results: List) -> List:
         
@@ -2430,24 +2606,32 @@ class GroqClient:
 
             CRITICAL INSTRUCTION: The user's message may contain placeholders like <PERSON_1>, <EMAIL_ADDRESS_1>, <EMPLOYEE_ID_1>, <PROJECT_CODE_1>, <PHONE_NUMBER_1>, <ORGANIZATION_1>, etc.
 
-            **YOU MUST PRESERVE THESE PLACEHOLDERS EXACTLY AS THEY APPEAR IN YOUR RESPONSE.**
+    **YOU MUST PRESERVE THESE PLACEHOLDERS EXACTLY AS THEY APPEAR IN YOUR RESPONSE.**
 
-            DO NOT:
-            - Replace placeholders with made-up names, numbers, or data
-            - Remove placeholders
-            - Change the placeholder format
+    IMPORTANT: If the user's message contains NO placeholders (meaning all entities were public figures or safe content), respond naturally without mentioning placeholders.
 
-            DO:
-            - Keep all placeholders like <PERSON_1>, <EMAIL_ADDRESS_1> exactly as shown
-            - Use the same placeholder if referring to the same entity multiple times
-            - Respond naturally while maintaining all placeholders
+    DO NOT:
+    - Replace placeholders with made-up names, numbers, or data
+    - Remove placeholders
+    - Change the placeholder format
+    - Mention placeholders if none exist in the input
 
-            Example:
-            User: "Hello, I am <PERSON_1>. My email is <EMAIL_ADDRESS_1>. Please write a formal introduction."
-            Correct Response: "Dear Team, I am pleased to introduce <PERSON_1>, who can be reached at <EMAIL_ADDRESS_1>."
-            Wrong Response: "Dear Team, I am pleased to introduce John Smith, who can be reached at john@example.com."
-            """
-        }
+    DO:
+    - Keep all placeholders like <PERSON_1>, <EMAIL_ADDRESS_1> exactly as shown
+    - Use the same placeholder if referring to the same entity multiple times
+    - Respond naturally while maintaining all placeholders
+    - If no placeholders exist, respond normally to the query
+
+    Example 1 (with placeholders):
+    User: "Hello, I am <PERSON_1>. My email is <EMAIL_ADDRESS_1>. Please write a formal introduction."
+    Correct Response: "Dear Team, I am pleased to introduce <PERSON_1>, who can be reached at <EMAIL_ADDRESS_1>."
+    
+    Example 2 (no placeholders - public figures):
+    User: "Elon Musk is CEO of Tesla."
+    Correct Response: "Yes, that's correct. Elon Musk is the CEO of Tesla, the electric vehicle and clean energy company."
+    Wrong Response: "<PERSON_1> is the CEO of <ORGANIZATION_1>." [DON'T DO THIS IF NO PLACEHOLDERS IN INPUT]
+    """
+}
         
         user_message = {
             "role": "user",
