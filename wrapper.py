@@ -22,6 +22,7 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, Pattern, PatternRecognizer
+from thinc import registry
             
 # Robust retry decorator
 def retry_on_failure(max_retries=3, delay=1):
@@ -460,7 +461,317 @@ class PublicEntityVerifier:
         except Exception as e:
             logger.debug(f"LLM verification failed for {name}: {e}")
             return False
+        
+try :
+    import langdetect
+    LANG_DETECT_AVAILABLE = True
+except ImportError:
+    LANG_DETECT_AVAILABLE = False
+    logger.warning("langdetect library not found. Language detection will be disabled.")
 
+class LanguageDetector:
+    def __init__(self):
+        self.supported_languages = {
+            'en': {'name': 'English', 'spacy': 'en_core_web_trf'},
+            'hi': {'name': 'Hindi', 'spacy': 'en_core_web_trf'},  # Fallback to English
+            'mr': {'name': 'Marathi', 'spacy': 'en_core_web_trf'},  # Fallback to English
+            'es': {'name': 'Spanish', 'spacy': 'es_core_news_lg'},
+            'fr': {'name': 'French', 'spacy': 'fr_core_news_lg'},
+            'de': {'name': 'German', 'spacy': 'de_core_news_lg'},
+            'zh-cn': {'name': 'Chinese', 'spacy': 'zh_core_web_lg'},
+            'ja': {'name': 'Japanese', 'spacy': 'ja_core_news_lg'},
+            'pt': {'name': 'Portuguese', 'spacy': 'pt_core_news_lg'},
+            'ar': {'name': 'Arabic', 'spacy': 'en_core_web_trf'},  # Fallback
+            'ko': {'name': 'Korean', 'spacy': 'en_core_web_trf'}
+        }
+    
+    def detect_language(self, text: str) -> str:
+        """Detect language from text"""
+        if not LANG_DETECT_AVAILABLE:
+            logger.warning("langdetect not available, defaulting to English")
+            return 'en'
+        
+        try:
+            detected = langdetect.detect(text)
+            if detected in self.supported_languages:
+                logger.info(f"✓ Detected language: {self.supported_languages[detected]['name']}")
+                return detected
+            else:
+                logger.warning(f"Language '{detected}' not fully supported, defaulting to English")
+                return 'en'
+        except Exception as e:
+            logger.warning(f"Language detection failed: {e}. Defaulting to English")
+            return 'en'
+    
+    def detect_with_confidence(self, text: str) -> Dict:
+        """Detect language with confidence scores"""
+        if not LANG_DETECT_AVAILABLE:
+            return {'primary_language': 'en', 'confidence': 0.5, 'all_detected': []}
+        
+        try:
+            probabilities = langdetect.detect_langs(text)
+            return {
+                'primary_language': str(probabilities[0]).split(':')[0],
+                'confidence': float(str(probabilities[0]).split(':')[1]),
+                'all_detected': [
+                    {'lang': str(p).split(':')[0], 'prob': float(str(p).split(':')[1])} 
+                    for p in probabilities
+                ]
+            }
+        except Exception as e:
+            logger.error(f"Language detection with confidence failed: {e}")
+            return {'primary_language': 'en', 'confidence': 0.5, 'all_detected': []}
+    
+    def get_spacy_model(self, language: str) -> str:
+        """Get appropriate spaCy model for language"""
+        return self.supported_languages.get(language, {}).get('spacy', 'en_core_web_trf')
+    
+# ============================================================================
+# MULTI-LANGUAGE PII RECOGNIZERS - ADD AFTER LanguageDetector
+# ============================================================================
+
+class MultilingualPIIRecognizers:
+    """PII recognizers for multiple languages"""
+    
+    # ========== SPANISH ==========
+    @staticmethod
+    def create_spanish_dni_recognizer():
+        """Spanish DNI (Documento Nacional de Identidad)"""
+        patterns = [
+            Pattern("DNI", r"\b\d{8}[A-Z]\b", 0.9),  # 12345678A
+        ]
+        return PatternRecognizer(
+            supported_entity="ES_DNI",
+            patterns=patterns,
+            context=["dni", "documento", "identidad"]
+        )
+    
+    @staticmethod
+    def create_spanish_nie_recognizer():
+        """Spanish NIE (Número de Identificación de Extranjero)"""
+        patterns = [
+            Pattern("NIE", r"\b[XYZ]\d{7}[A-Z]\b", 0.9),
+        ]
+        return PatternRecognizer(
+            supported_entity="ES_NIE",
+            patterns=patterns,
+            context=["nie", "extranjero"]
+        )
+    
+    @staticmethod
+    def create_spanish_phone_recognizer():
+        """Spanish phone numbers"""
+        patterns = [
+            Pattern("ES Phone", r"\+34\s?[6-9]\d{8}\b", 0.95),  # +34 612345678
+            Pattern("ES Phone", r"\b[6-9]\d{8}\b", 0.85),  # 612345678
+        ]
+        return PatternRecognizer(
+            supported_entity="ES_PHONE",
+            patterns=patterns,
+            context=["teléfono", "móvil", "telefono", "movil", "phone"]
+        )
+    
+    # ========== FRENCH ==========
+    @staticmethod
+    def create_french_nir_recognizer():
+        """French NIR/Social Security Number"""
+        patterns = [
+            Pattern("NIR", r"\b[12]\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{3}\s?\d{3}\s?\d{2}\b", 0.9),
+        ]
+        return PatternRecognizer(
+            supported_entity="FR_NIR",
+            patterns=patterns,
+            context=["sécurité sociale", "nir", "numéro sécu", "social security"]
+        )
+    
+    @staticmethod
+    def create_french_phone_recognizer():
+        """French phone numbers"""
+        patterns = [
+            Pattern("FR Phone", r"\+33\s?[1-9]\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}\b", 0.95),
+            Pattern("FR Phone", r"\b0[1-9]\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}\b", 0.9),
+        ]
+        return PatternRecognizer(
+            supported_entity="FR_PHONE",
+            patterns=patterns,
+            context=["téléphone", "portable", "tel", "phone"]
+        )
+    
+    # ========== GERMAN ==========
+    @staticmethod
+    def create_german_tax_id_recognizer():
+        """German Tax ID (Steuer-ID)"""
+        patterns = [
+            Pattern("DE Tax ID", r"\b\d{11}\b", 0.75),
+        ]
+        return PatternRecognizer(
+            supported_entity="DE_TAX_ID",
+            patterns=patterns,
+            context=["steuer", "steuer-id", "steuernummer", "tax"]
+        )
+    
+    @staticmethod
+    def create_german_phone_recognizer():
+        """German phone numbers"""
+        patterns = [
+            Pattern("DE Phone", r"\+49\s?\d{2,5}\s?\d{4,10}\b", 0.95),
+            Pattern("DE Phone", r"\b0\d{2,5}\s?\d{4,10}\b", 0.85),
+        ]
+        return PatternRecognizer(
+            supported_entity="DE_PHONE",
+            patterns=patterns,
+            context=["telefon", "handy", "tel", "phone"]
+        )
+    
+    # ========== CHINESE ==========
+    @staticmethod
+    def create_chinese_id_recognizer():
+        """Chinese National ID"""
+        patterns = [
+            Pattern("CN ID", r"\b\d{17}[\dXx]\b", 0.9),
+        ]
+        return PatternRecognizer(
+            supported_entity="CN_ID",
+            patterns=patterns,
+            context=["身份证", "身份證", "id card"]
+        )
+    
+    @staticmethod
+    def create_chinese_phone_recognizer():
+        """Chinese phone numbers"""
+        patterns = [
+            Pattern("CN Phone", r"\+86\s?1[3-9]\d{9}\b", 0.95),
+            Pattern("CN Phone", r"\b1[3-9]\d{9}\b", 0.85),
+        ]
+        return PatternRecognizer(
+            supported_entity="CN_PHONE",
+            patterns=patterns,
+            context=["电话", "手机", "電話", "手機", "phone"]
+        )
+    
+    # ========== JAPANESE ==========
+    @staticmethod
+    def create_japanese_phone_recognizer():
+        """Japanese phone numbers"""
+        patterns = [
+            Pattern("JP Phone", r"\+81\s?\d{1,4}-?\d{1,4}-?\d{4}\b", 0.95),
+            Pattern("JP Phone", r"\b0\d{1,4}-?\d{1,4}-?\d{4}\b", 0.85),
+        ]
+        return PatternRecognizer(
+            supported_entity="JP_PHONE",
+            patterns=patterns,
+            context=["電話", "携帯", "ケータイ", "phone"]
+        )
+    
+    @staticmethod
+    def create_japanese_name_recognizer():
+        patterns = [
+        # Common Japanese name patterns (Kanji)
+        Pattern("JP Name", r"[\u4e00-\u9fff]{2,4}", 0.80),  # 2-4 Kanji characters
+        
+        # Full name patterns (surname + given name)
+        Pattern("JP Name", r"[\u4e00-\u9fff]{1,3}\s?[\u4e00-\u9fff]{1,3}", 0.85),
+        
+        # Hiragana names
+        Pattern("JP Name", r"[\u3040-\u309f]{2,8}", 0.75),
+        
+        # Katakana names
+        Pattern("JP Name", r"[\u30a0-\u30ff]{2,8}", 0.75),
+    ]
+        return PatternRecognizer(
+            supported_entity="JP_PERSON",
+            patterns=patterns,
+            context=["さん", "氏", "様", "君", "name", "名前", "氏名"]  # Japanese honorifics
+        )
+        
+    # ========== PORTUGUESE ==========
+    @staticmethod
+    def create_portuguese_cpf_recognizer():
+        """Brazilian CPF"""
+        patterns = [
+            Pattern("CPF", r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b", 0.9),
+        ]
+        return PatternRecognizer(
+            supported_entity="BR_CPF",
+            patterns=patterns,
+            context=["cpf", "cadastro"]
+        )
+    
+    @staticmethod
+    def create_portuguese_phone_recognizer():
+        """Portuguese/Brazilian phone numbers"""
+        patterns = [
+            Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-?\d{4}\b", 0.95),  # Brazil
+            Pattern("PT/BR Phone", r"\+351\s?\d{9}\b", 0.95),  # Portugal
+        ]
+        return PatternRecognizer(
+            supported_entity="PT_PHONE",
+            patterns=patterns,
+            context=["telefone", "celular", "phone"]
+        )
+    # ========== JAPANESE NAMES ==========
+    @staticmethod
+    def create_japanese_name_recognizer():
+        """Japanese names (Kanji/Hiragana/Katakana)"""
+        patterns = [
+            # Common Japanese name patterns (Kanji)
+            Pattern("JP Name", r"[\u4e00-\u9fff]{2,4}", 0.80),  # 2-4 Kanji characters
+            
+            # Full name patterns (surname + given name)
+            Pattern("JP Name", r"[\u4e00-\u9fff]{1,3}\s?[\u4e00-\u9fff]{1,3}", 0.85),
+            
+            # Hiragana names
+            Pattern("JP Name", r"[\u3040-\u309f]{2,8}", 0.75),
+            
+            # Katakana names
+            Pattern("JP Name", r"[\u30a0-\u30ff]{2,8}", 0.75),
+        ]
+        return PatternRecognizer(
+            supported_entity="JP_PERSON",
+            patterns=patterns,
+            context=["さん", "氏", "様", "君", "name", "名前", "氏名"]  # Japanese honorifics
+        )
+
+# ========== CHINESE NAMES ==========
+    @staticmethod
+    def create_chinese_name_recognizer():
+        """Chinese names (Simplified/Traditional)"""
+        patterns = [
+            # Chinese name patterns (2-4 characters)
+            Pattern("CN Name", r"[\u4e00-\u9fff]{2,4}", 0.80),
+        ]
+        return PatternRecognizer(
+            supported_entity="CN_PERSON",
+            patterns=patterns,
+            context=["先生", "女士", "小姐", "名字", "姓名", "name"]
+        )
+    @staticmethod
+    def create_chinese_name_recognizer():
+        """Chinese names (Simplified/Traditional)"""
+        patterns = [
+            # Chinese name patterns (2-4 characters)
+            Pattern("CN Name", r"[\u4e00-\u9fff]{2,4}", 0.80),
+        ]
+        return PatternRecognizer(
+            supported_entity="CN_PERSON",
+            patterns=patterns,
+            context=["先生", "女士", "小姐", "名字", "姓名", "name"]
+        )
+
+# ========== KOREAN NAMES ==========
+    @staticmethod
+    def create_korean_name_recognizer():
+        """Korean names (Hangul)"""
+        patterns = [
+            # Korean name patterns
+            Pattern("KR Name", r"[\uac00-\ud7af]{2,4}", 0.80),
+        ]
+        return PatternRecognizer(
+            supported_entity="KR_PERSON",
+            patterns=patterns,
+            context=["씨", "님", "이름", "성명", "name"]
+        )
+    
 # ID DOCUMENT DETECTOR 
 class IDDocumentDetector:
     """Detect identity documents in images using template matching and OCR"""
@@ -1406,7 +1717,11 @@ class CorporatePIIRecognizers:
 # Enhanced Context-Aware PII Guard
 class ContextAwarePIIGuard:
     
-    def __init__(self, spacy_model: str, language: str, groq_client):
+    def __init__(self, spacy_model: str, language: str, groq_client , auto_detect_language):
+         # Language support
+        self.language_detector = LanguageDetector()
+        self.auto_detect = auto_detect_language
+        self.current_language = language
         # Initialize Presidio
         nlp_config = {
             "nlp_engine_name": "spacy",
@@ -1434,7 +1749,36 @@ class ContextAwarePIIGuard:
         registry.add_recognizer(CorporatePIIRecognizers.create_project_code_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_home_address_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_client_name_recognizer())
-        
+
+        # Multi -language support can be added here
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_dni_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_nie_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_phone_recognizer())
+
+        # French
+        registry.add_recognizer(MultilingualPIIRecognizers.create_french_nir_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_french_phone_recognizer())
+
+        # German
+        registry.add_recognizer(MultilingualPIIRecognizers.create_german_tax_id_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_german_phone_recognizer())
+
+         # Chinese
+        registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_id_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_phone_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_name_recognizer())
+
+        # Korean
+        registry.add_recognizer(MultilingualPIIRecognizers.create_korean_name_recognizer())
+        # Japanese
+        registry.add_recognizer(MultilingualPIIRecognizers.create_japanese_phone_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_japanese_name_recognizer())
+
+        # portuguese
+        registry.add_recognizer(MultilingualPIIRecognizers.create_portuguese_cpf_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_portuguese_phone_recognizer())
+
+
         self.analyzer = AnalyzerEngine(
             nlp_engine=nlp_engine,
             supported_languages=[language],
@@ -1463,7 +1807,15 @@ class ContextAwarePIIGuard:
         'PROJECT_CODE': [],
         'HOME_ADDRESS': [],
         'PASSPORT': [],
+        'JP_PERSON': [],
+        'CN_PERSON': [],
+        'KR_PERSON': [],
+        'ES_DNI': [],
+        'FR_NIR': [],  
+        'DE_TAX_ID': [], 
     }
+        logger.info(f"✓ PII Guard initialized for language: {language}")
+        logger.info(f"✓ Auto-detect language: {auto_detect_language}")
     
     def classify_pii_intent(self, text: str) -> Dict:
         """
@@ -1533,6 +1885,43 @@ class ContextAwarePIIGuard:
             "reason": "fallback - classification error"
         }
     
+    def detect_and_switch_language(self, text: str) -> str:
+        """
+        Detect language and switch analyzer if needed
+        Returns: detected language code
+        """
+        if not self.auto_detect:
+            return self.current_language
+        
+        detected_lang = self.language_detector.detect_language(text)
+        
+        if detected_lang != self.current_language:
+            logger.info(f"Language switched: {self.current_language} → {detected_lang}")
+            self.current_language = detected_lang
+            
+            # Get appropriate spaCy model
+            spacy_model = self.language_detector.get_spacy_model(detected_lang)
+            
+            # Reinitialize analyzer with new language
+            try:
+                nlp_config = {
+                    "nlp_engine_name": "spacy",
+                    "models": [{"lang_code": detected_lang, "model_name": spacy_model}]
+                }
+                provider = NlpEngineProvider(nlp_configuration=nlp_config)
+                nlp_engine = provider.create_engine()
+                
+                self.analyzer = AnalyzerEngine(
+                    nlp_engine=nlp_engine,
+                    supported_languages=[detected_lang],
+                    registry=self.analyzer.registry
+                )
+                self.language = detected_lang
+                logger.info(f"✓ Analyzer switched to {detected_lang}")
+            except Exception as e:
+                logger.warning(f"Could not switch to {detected_lang}, keeping {self.current_language}: {e}")
+        
+        return self.current_language
 
     def get_redaction_report(self) -> Dict:
         """Generate detailed redaction report"""
@@ -1562,6 +1951,9 @@ class ContextAwarePIIGuard:
                 f"PII allowed for computation — skipping redaction. Reason: {intent_decision['reason']}"
             )
             return text
+        
+        detected_language = self.detect_and_switch_language(text)
+        logger.info(f"Using language for analysis: {detected_language}")
         
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
@@ -1655,7 +2047,9 @@ class ContextAwarePIIGuard:
             
             # Redact USER_PII and THIRD_PARTY_PII
             if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                    'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
+                    'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID'] or \
+                result.entity_type in ['JP_PERSON', 'CN_PERSON', 'KR_PERSON']:
+                
                 logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
                 filtered_results.append(result)
 
@@ -2677,12 +3071,13 @@ class GroqClient:
 # Main Pipeline
 class IntelligentPIIPipeline:
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, auto_detect_language: bool = True):
         self.llm_client = GroqClient(config.groq_api_key, config.groq_model)
         self.pii_guard = ContextAwarePIIGuard(
             spacy_model=config.spacy_model,
             language=config.language,
-            groq_client=self.llm_client.client
+            groq_client=self.llm_client.client,
+            auto_detect_language=auto_detect_language
         )
         self.pdf_handler = PDFHandler(self.pii_guard)
         self.spreadsheet_handler = SpreadsheetHandler(self.pii_guard)
