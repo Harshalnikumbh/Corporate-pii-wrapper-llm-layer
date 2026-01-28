@@ -214,90 +214,98 @@ class ContextAwareClassifier:
         self.groq_client = groq_client
         self.classification_cache = {}
     
-    def classify_entities_in_context(self, text: str, detected_entities: List[Dict]) -> Dict[str, str]:
-       
+    def classify_entities_in_context(self, text: str, detected_entities: List[Dict]) -> Dict[int, str]:
+        """
+        Classify entities based on their POSITION and surrounding context.
+        Returns: Dict mapping position -> classification
+        """
         if not detected_entities:
             return {}
         
-        # Build entity list for LLM
+        # Build entity list for LLM with POSITION information
         entity_list = []
-        # Maps lowercase -> original case
-        entity_case_map = {}
         for idx, entity in enumerate(detected_entities):
             entity_text = entity['text']
-            entity_text_lower = entity_text.lower()
-
-            if entity_text_lower not in entity_case_map:
-                entity_case_map[entity_text_lower] = entity_text
-            entity_list.append(f"{len(entity_case_map)}. '{entity_text}' (Type: {entity['type']})")
+            position = entity['start']
+            
+            # Extract surrounding context (20 chars before and after)
+            context_start = max(0, position - 20)
+            context_end = min(len(text), entity['end'] + 20)
+            surrounding_context = text[context_start:context_end]
+            
+            entity_list.append(
+                f"{idx + 1}. '{entity_text}' at position {position} "
+                f"(Context: \"{surrounding_context}\")"
+            )
 
         prompt = f"""You are a CORPORATE DATA SECURITY expert analyzing text from a company employee to prevent data leaks.
 
-            CONTEXT: This is from a corporate environment. Your job is to protect:
-            - Employee personal information
-            - Client/customer data
-            - Financial information
-            - Project codes and proprietary information
+    CONTEXT: This is from a corporate environment. Your job is to protect:
+    - Employee personal information
+    - Client/customer data
+    - Financial information
+    - Project codes and proprietary information
 
-            TEXT TO ANALYZE:
-            {text}
+    TEXT TO ANALYZE:
+    {text}
 
-            DETECTED ENTITIES:
-            {chr(10).join(entity_list)}
+    DETECTED ENTITIES WITH CONTEXT:
+    {chr(10).join(entity_list)}
 
-            CLASSIFY EACH ENTITY INTO ONE CATEGORY:
+    CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 
-            1. **EMPLOYEE_PII** - Employee's own sensitive information [CHECK FIRST FOR "I am", "My name is"]
-            - **IF THE TEXT CONTAINS "I am [NAME]" OR "My name is [NAME]" → THAT NAME IS EMPLOYEE_PII**
-            - Employee's phone, email, address, ID numbers, salary, bank details
-            - Employee's own employee ID (e.g., "My employee id is EMP-55621")
-            - Examples:
-            * "I am roHiT sHArMa" → roHiT sHArMa is EMPLOYEE_PII
-            * "My employee id is EMP-55621" → EMP-55621 is EMPLOYEE_PII
-            * "My email is rohit@company.com" → EMPLOYEE_PII
+    1. **EMPLOYEE_PII** - Employee's own sensitive information
+    - **CRITICAL: Look for "I am [NAME]", "My name is [NAME]", "I'm [NAME]"**
+    - If NAME appears after these phrases → EMPLOYEE_PII
+    - Examples:
+        * "I am Harshal" → Harshal is EMPLOYEE_PII
+        * "My employee id is EMP-55621" → EMP-55621 is EMPLOYEE_PII
 
-            2. **CLIENT_SENSITIVE** - Client/customer/vendor information
-            - **IF THE TEXT CONTAINS "Our client [NAME]" OR "Client: [NAME]" → THAT NAME IS CLIENT_SENSITIVE**
-            - Customer contact details, addresses, account numbers
-            - Small/medium business names that are not publicly famous
-            - Examples:
-            * "Our client Ankit Verma" → Ankit Verma is CLIENT_SENSITIVE
-            * "Client account 123456" → CLIENT_SENSITIVE
+    2. **COLLEAGUE_PII** - Other employees/colleagues mentioned
+    - **Look for "my friend [NAME]", "my colleague [NAME]", "with [NAME]"**
+    - If NAME appears after these phrases → COLLEAGUE_PII
+    - NOT the speaker, but other people
+    - Examples:
+        * "my friend Amit" → Amit is COLLEAGUE_PII
+        * "my colleague Harshal" → Harshal is COLLEAGUE_PII
 
-            3. **PUBLIC_FIGURE** - Famous people/large organizations
-            - Celebrities, politicians, tech leaders (Elon Musk, Bill Gates, etc.)
-            - Fortune 500 companies (Google, Microsoft, Tesla, Apple, Amazon)
-            - Historical figures
-            - **IF globally famous → PUBLIC_FIGURE**
-            - Examples: "Elon Musk" → PUBLIC_FIGURE, "Google" → PUBLIC_FIGURE
+    3. **CLIENT_SENSITIVE** - Client/customer/vendor information
+    - **Look for "Our client [NAME]", "Client: [NAME]"**
+    - Customer contact details, addresses
+    - Examples:
+        * "Our client Ankit Verma" → Ankit Verma is CLIENT_SENSITIVE
 
-            4. **FINANCIAL_DATA** - Money-related sensitive info
-            - Bank accounts, IFSC codes, salary, revenue
-            - Examples: "account number 998877665544" → FINANCIAL_DATA
+    4. **PUBLIC_FIGURE** - Famous people/large organizations
+    - Celebrities, politicians, tech leaders
+    - Fortune 500 companies
+    - Examples: "Elon Musk", "Google", "Microsoft"
 
-            5. **EMPLOYEE_ID** - Employee identification codes
-            - Codes like "EMP-55621", "STAFF-12345"
-            - **IF context says "employee id" → EMPLOYEE_ID**
+    5. **FINANCIAL_DATA** - Money-related info
+    - Bank accounts, IFSC codes, salary
 
-            6. **PROJECT_CODE** - Project identifiers
-            - "PROJ-12345", "MK-CAM9821"
+    6. **EMPLOYEE_ID** - Employee codes
+    - "EMP-55621", "STAFF-12345"
 
-            7. **COLLEAGUE_PII** - Other employees/colleagues mentioned
-            - NOT the speaker, but other employees
-            - Example: "my colleague Amit" → COLLEAGUE_PII
+    7. **PROJECT_CODE** - Project identifiers
+    - "PROJ-12345"
 
-            8. **KEEP** - Safe generic terms
-            - Job titles, cities, countries
+    8. **KEEP** - Safe generic terms
+    - Job titles, cities, countries
 
-            CRITICAL DECISION RULES:
-            1. Check "I am [NAME]" → NAME = EMPLOYEE_PII
-            2. Check "Our client [NAME]" → NAME = CLIENT_SENSITIVE  
-            3. Check if famous → PUBLIC_FIGURE
-            4. Check "employee id" context → EMPLOYEE_ID
-            5. Default to KEEP if unsure
+    🔥 CRITICAL RULES FOR SAME NAME:
+    1. **"I am [NAME]"** → NAME = EMPLOYEE_PII
+    2. **"my friend [NAME]"** → NAME = COLLEAGUE_PII  
+    3. **SAME NAME CAN HAVE DIFFERENT CLASSIFICATIONS BASED ON CONTEXT**
+    4. Check the surrounding words carefully for each occurrence
 
-Respond ONLY with JSON:
-{{"1": "EMPLOYEE_PII", "2": "PUBLIC_FIGURE", "3": "CLIENT_SENSITIVE", ...}}"""
+    Example:
+    Text: "I am Harshal and this is my friend Harshal"
+    Entity 1: "Harshal" after "I am" → EMPLOYEE_PII
+    Entity 2: "Harshal" after "my friend" → COLLEAGUE_PII
+
+    Respond ONLY with JSON mapping entity number to classification:
+    {{"1": "EMPLOYEE_PII", "2": "COLLEAGUE_PII"}}"""
+
         try:
             response = self.groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -311,21 +319,24 @@ Respond ONLY with JSON:
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
             if json_match:
-                classifications = json.loads(json_match.group())
+                classifications_by_index = json.loads(json_match.group())
                 
-                # Map back to entity texts
-                entity_classifications = {}
+                # Map to position-based classifications
+                position_classifications = {}
                 for idx, entity in enumerate(detected_entities):
-                    classification = classifications.get(str(idx + 1), "KEEP")
-                    entity_classifications[entity['text']] = classification
+                    classification = classifications_by_index.get(str(idx + 1), "KEEP")
+                    position = entity['start']
+                    position_classifications[position] = classification
+                    
+                    logger.info(f"Entity #{idx+1}: '{entity['text']}' at position {position} → {classification}")
                 
-                return entity_classifications
+                return position_classifications
             
         except Exception as e:
             logger.warning(f"Context classification failed: {e}")
         
-        # Fallback: treat all PERSON entities as potential PII
-        return {entity['text']: 'USER_PII' if entity['type'] == 'PERSON' else 'KEEP' 
+        # Fallback
+        return {entity['start']: 'USER_PII' if entity['type'] == 'PERSON' else 'KEEP' 
                 for entity in detected_entities}
 
 # Public Entity Verification
@@ -1116,7 +1127,6 @@ class ScreenDashboardDetector:
         
         except Exception as e:
             logger.warning(f"Screen detection failed: {e}")
-        
         return detected_screens
     
     def _find_screen_region(self, image_cv, ocr_results) -> Optional[Tuple]:
@@ -1460,47 +1470,47 @@ class ContextAwarePIIGuard:
         Decide whether PII in the prompt is REQUIRED to fulfill the user's request.
         """
         prompt = f"""
-    You are a DATA GOVERNANCE AI.
+            You are a DATA GOVERNANCE AI.
 
-    Determine if personal data in the user prompt is REQUIRED to answer the user's request.
+            Determine if personal data in the user prompt is REQUIRED to answer the user's request.
 
-    Text:
-    {text}
+            Text:
+            {text}
 
-    Allowed intents:
+            Allowed intents:
 
-    1. COMPUTATION_ALLOWED
-    - Age calculation from DOB
-    - Date difference calculations
-    - Eligibility checks using personal data
-    - Statistical queries
-    Example: "My DOB is 04/10/2006, tell me my age"
+            1. COMPUTATION_ALLOWED
+            - Age calculation from DOB
+            - Date difference calculations
+            - Eligibility checks using personal data
+            - Statistical queries
+            Example: "My DOB is 04/10/2006, tell me my age"
 
-    2. TRANSFORMATION_ALLOWED
-    - Asking about name meanings ("What does the name Harshal mean?")
-    - Name formatting/translation
-    - Linguistic queries about words that happen to be names
-    - Cultural/etymological questions
-    Example: "Tell me the meaning of the name Priya"
+            2. TRANSFORMATION_ALLOWED
+            - Asking about name meanings ("What does the name Harshal mean?")
+            - Name formatting/translation
+            - Linguistic queries about words that happen to be names
+            - Cultural/etymological questions
+            Example: "Tell me the meaning of the name Priya"
 
-    3. REDACTION_REQUIRED
-    - Casual mention of PII not needed for the task
-    - Sensitive data in context (emails, phones, addresses)
-    - Identity documents
-    - Default for uncertain cases
+            3. REDACTION_REQUIRED
+            - Casual mention of PII not needed for the task
+            - Sensitive data in context (emails, phones, addresses)
+            - Identity documents
+            - Default for uncertain cases
 
-    🔥 CRITICAL RULES:
-    - If the query is ABOUT a name/word itself (not a person) → TRANSFORMATION_ALLOWED
-    - If removing the data breaks the task logic → COMPUTATION_ALLOWED
-    - If the data is just mentioned casually → REDACTION_REQUIRED
-    - When in doubt → REDACTION_REQUIRED
+            🔥 CRITICAL RULES:
+            - If the query is ABOUT a name/word itself (not a person) → TRANSFORMATION_ALLOWED
+            - If removing the data breaks the task logic → COMPUTATION_ALLOWED
+            - If the data is just mentioned casually → REDACTION_REQUIRED
+            - When in doubt → REDACTION_REQUIRED
 
-    Respond ONLY in JSON:
-    {{
-    "intent": "COMPUTATION_ALLOWED | TRANSFORMATION_ALLOWED | REDACTION_REQUIRED",
-    "reason": "brief explanation in 10 words"
-    }}
-    """
+            Respond ONLY in JSON:
+            {{
+            "intent": "COMPUTATION_ALLOWED | TRANSFORMATION_ALLOWED | REDACTION_REQUIRED",
+            "reason": "brief explanation in 10 words"
+            }}
+            """
         try:
             response = self.context_classifier.groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -1602,41 +1612,51 @@ class ContextAwarePIIGuard:
         
         # Classify entities based on context
         if context_aware:
-            classifications = self.context_classifier.classify_entities_in_context(text, detected_entities)
+            # NEW: classify_entities_in_context now returns position-based classifications directly
+            position_based_classifications = self.context_classifier.classify_entities_in_context(text, detected_entities)
+            
+            # Create text-based classifications for backward compatibility
+            classifications = {}
             for entity in detected_entities:
-                if entity['type'] == 'PERSON':
-                    entity_text = entity['text']
-                    current_classification = classifications.get(entity_text, 'KEEP')
-
-                    if current_classification not in ['PUBLIC_FIGURE', 'KEEP']:
-                        if self.public_verifier.is_public_figure(entity_text):
-                            classifications[entity_text] = 'PUBLIC_FIGURE'
-                            logger.info(f"✓ Verified as PUBLIC_FIGURE: {entity_text}")
-
+                entity_text = entity['text']
+                position = entity['start']
+                classification = position_based_classifications.get(position, 'KEEP')
+                
+                # Store both for backward compatibility
+                if entity_text not in classifications:
+                    classifications[entity_text] = classification
+                
+                # Verify public figures (only if classified as PERSON)
+                if entity['type'] == 'PERSON' and classification not in ['PUBLIC_FIGURE', 'KEEP']:
+                    if self.public_verifier.is_public_figure(entity_text):
+                        position_based_classifications[position] = 'PUBLIC_FIGURE'
+                        logger.info(f"✓ Verified as PUBLIC_FIGURE: {entity_text}")
         else:
             classifications = {e['text']: 'USER_PII' for e in detected_entities}
+            position_based_classifications = {e['start']: 'USER_PII' for e in detected_entities}
 
         # Filter results based on classification
         filtered_results = []
-        classifications_lower = {k.lower(): v for k, v in classifications.items()}
+        
         for result in results:
             entity_text = text[result.start:result.end]
-            classification = classifications.get(entity_text)
-            if classification is None:
-                classification = classifications_lower.get(entity_text.lower(), 'KEEP')
+            position = result.start
+            
+            # Get classification for THIS SPECIFIC POSITION
+            classification = position_based_classifications.get(position, 'KEEP')
 
-            logger.debug(f"Entity: '{entity_text}' | Type: {result.entity_type} | Classification: {classification}")
+            logger.debug(f"Entity: '{entity_text}' at position {position} | Type: {result.entity_type} | Classification: {classification}")
             
             # Keep public figures and entities marked as KEEP
             if classification in ['PUBLIC_FIGURE', 'KEEP']:
                 self.kept_entities.add(entity_text)
-                logger.info(f"KEEPING: {entity_text} - {classification}")
+                logger.info(f"KEEPING: {entity_text} at position {position} - {classification}")
                 continue
             
             # Redact USER_PII and THIRD_PARTY_PII
             if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
                     'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
-                logger.info(f"REDACTING: {entity_text} - {classification}")
+                logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
                 filtered_results.append(result)
 
                 category = classification if classification in self.redaction_summary else result.entity_type
@@ -1644,17 +1664,15 @@ class ContextAwarePIIGuard:
                     self.redaction_summary[category].append({
                         'text': entity_text,
                         'type': result.entity_type,
-                        'reason': classification
+                        'reason': classification,
+                        'position': position  # Track position
                     })
         
         if not filtered_results:
             return text
         
-
-    
-        # CONTEXT-AWARE: Build unique entity mapping with classification
-       
-        entity_value_map = {}  # Maps (entity_value, classification) -> unique placeholder
+        # CONTEXT-AWARE: Build unique entity mapping with classification AND position
+        entity_value_map = {}  # Maps (entity_value, classification, position) -> unique placeholder
         global_counters = {}   # Counter per entity type
         entity_positions = {}  # Track which placeholder to use for each position
 
@@ -1675,16 +1693,19 @@ class ContextAwarePIIGuard:
 
             entity_type = result.entity_type
             entity_value = text[result.start:result.end]
-            classification = classifications.get(entity_value, 'KEEP')
+            position = result.start
+            classification = position_based_classifications.get(position, 'KEEP')
+            
             # Mark this span as processed
             processed_spans.append((result.start, result.end))
             
-            # Create a unique key combining entity value AND its classification context
-            entity_context_key = (entity_value, classification)
+            # Create a unique key combining entity value, classification, AND position
+            # This ensures same name with different classifications gets different placeholders
+            entity_context_key = (entity_value.lower(), classification, position)
             
-            # If we've seen this exact (value, context) combination before, reuse placeholder
+            # Assign new placeholder for each unique context
             if entity_context_key not in entity_value_map:
-                # First time seeing this entity in this context, assign new number
+                # First time seeing this entity in this context at this position
                 global_counters[entity_type] = global_counters.get(entity_type, 0) + 1
                 unique_number = global_counters[entity_type]
                 placeholder = self._get_semantic_placeholder(entity_type, classification, unique_number)
@@ -1695,10 +1716,11 @@ class ContextAwarePIIGuard:
                 # Also store in reverse mapping with context info
                 self.reverse_mapping[placeholder] = {
                     'value': entity_value,
-                    'classification': classification
+                    'classification': classification,
+                    'position': position
                 }
                 
-                logger.debug(f"Created mapping: {entity_value} ({classification}) → {placeholder}")
+                logger.debug(f"Created mapping: {entity_value} at {position} ({classification}) → {placeholder}")
             
             # Store which placeholder to use at this position
             placeholder = entity_value_map[entity_context_key]
@@ -1709,6 +1731,7 @@ class ContextAwarePIIGuard:
             }
             
             # Update simple mapping for backward compatibility
+            # Don't override if it already exists - preserve first occurrence
             if entity_value not in self.mapping:
                 self.mapping[entity_value] = placeholder
 
@@ -1755,15 +1778,15 @@ class ContextAwarePIIGuard:
                     # Mark this position as replaced
                     replaced_positions.add(result.start)
                     
-                    logger.debug(f"Replaced '{expected_text}' with '{placeholder}' at position {result.start}")
+                    logger.debug(f"Replaced '{expected_text}' at position {result.start} with '{placeholder}'")
                 else:
                     logger.warning(f"Text mismatch at {result.start}: expected '{expected_text}', found '{actual_text}'")
                     logger.warning(f"Entity type: {result.entity_type}")
 
-                # Restore titles in the anonymized text
-                final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
-                
-                return final_text
+        # Restore titles in the anonymized text
+        final_text = self._restore_titles_in_anonymized_text(text, anonymized_text)
+        
+        return final_text
             
     def _remove_overlapping_entities(self, entities: List[Dict]) -> List[Dict]:
         """Remove overlapping entities, keeping higher confidence ones"""
@@ -2093,7 +2116,7 @@ class SpreadsheetHandler:
                             cells_redacted += 1
         
         df.to_csv(output_path, index=False)
-        logger.info(f"Saved redacted CSV: {output_path}")
+        logger.info(f"Saved redacted CSV: {output_path}")  
         
         return {
             'type': 'csv',
@@ -2677,13 +2700,13 @@ class IntelligentPIIPipeline:
                 logger.info("="*80)
             
             # ========== STEP 1: CLASSIFY INTENT ==========
-            # 🔥 FIX: Call through self.pii_guard (not self)
+            #  Call through self.pii_guard (not self)
             intent_decision = self.pii_guard.classify_pii_intent(text)
             intent = intent_decision["intent"]
             reason = intent_decision["reason"]
             
-            logger.info(f"🧠 Intent Classification: {intent}")
-            logger.info(f"📌 Reason: {reason}")
+            logger.info(f"Intent Classification: {intent}")
+            logger.info(f"Reason: {reason}")
             
             # ========== STEP 2: DECIDE REDACTION STRATEGY ==========
             
