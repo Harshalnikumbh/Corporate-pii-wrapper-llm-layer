@@ -701,13 +701,25 @@ class MultilingualPIIRecognizers:
     def create_portuguese_phone_recognizer():
         """Portuguese/Brazilian phone numbers"""
         patterns = [
-            Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-?\d{4}\b", 0.95),  # Brazil
-            Pattern("PT/BR Phone", r"\+351\s?\d{9}\b", 0.95),  # Portugal
+            # Brazil with country code: +55 11 98765-4321 or +55 11 987654321
+            Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-?\d{4}\b", 0.95),
+            
+            # Portugal with country code: +351 912345678
+            Pattern("PT/BR Phone", r"\+351\s?\d{9}\b", 0.95),
+            
+            # Brazil without country code: 11 98765-4321 or 11987654321
+            Pattern("PT/BR Phone", r"\b\d{2}\s?\d{4,5}-?\d{4}\b", 0.90),
+            
+            # Simple format with hyphen: 99887-6655 (8 or 9 digits)
+            Pattern("PT/BR Phone", r"\b\d{4,5}-\d{4}\b", 0.85),
+            
+            # Simple format without hyphen: 998876655 (8 or 9 digits)
+            Pattern("PT/BR Phone", r"\b\d{8,9}\b", 0.75),
         ]
         return PatternRecognizer(
             supported_entity="PT_PHONE",
             patterns=patterns,
-            context=["telefone", "celular", "phone"]
+            context=["telefone", "celular", "phone", "tel", "contato", "número"]
         )
     # ========== JAPANESE NAMES ==========
     @staticmethod
@@ -1734,6 +1746,19 @@ class ContextAwarePIIGuard:
         registry = RecognizerRegistry()
         registry.load_predefined_recognizers()
 
+        try:
+            # Get all recognizers
+            all_recognizers = registry.get_recognizers(language='en')
+            # Filter out US_SSN recognizer
+            filtered_recognizers = [r for r in all_recognizers if r.supported_entities != ['US_SSN']]
+            # Clear and re-add
+            registry.recognizers = filtered_recognizers
+            logger.info("✓ Removed US_SSN recognizer to prevent conflicts")
+        except Exception as e:
+            logger.warning(f"Could not remove US_SSN recognizer: {e}")
+
+
+
         # Add Indian PII recognizers
         registry.add_recognizer(IndianPIIRecognizers.create_aadhaar_recognizer())
         registry.add_recognizer(IndianPIIRecognizers.create_pan_recognizer())
@@ -1750,6 +1775,7 @@ class ContextAwarePIIGuard:
         registry.add_recognizer(CorporatePIIRecognizers.create_home_address_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_client_name_recognizer())
 
+
         # Multi -language support can be added here
         registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_dni_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_nie_recognizer())
@@ -1759,11 +1785,11 @@ class ContextAwarePIIGuard:
         registry.add_recognizer(MultilingualPIIRecognizers.create_french_nir_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_french_phone_recognizer())
 
-        # German
+            # German
         registry.add_recognizer(MultilingualPIIRecognizers.create_german_tax_id_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_german_phone_recognizer())
 
-         # Chinese
+        # Chinese
         registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_id_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_phone_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_chinese_name_recognizer())
@@ -1796,24 +1822,36 @@ class ContextAwarePIIGuard:
         self.kept_entities = set()
 
         self.redaction_summary = {
-        'EMPLOYEE_PII': [],
-        'CLIENT_SENSITIVE': [],
-        'FINANCIAL_DATA': [],
-        'COLLEAGUE_PII': [],
-        'BANK_ACCOUNT': [],
-        'IFSC_CODE': [],
-        'SALARY_INFO': [],
-        'EMPLOYEE_ID': [],
-        'PROJECT_CODE': [],
-        'HOME_ADDRESS': [],
-        'PASSPORT': [],
-        'JP_PERSON': [],
-        'CN_PERSON': [],
-        'KR_PERSON': [],
-        'ES_DNI': [],
-        'FR_NIR': [],  
-        'DE_TAX_ID': [], 
-    }
+            'EMPLOYEE_PII': [],
+            'CLIENT_SENSITIVE': [],
+            'FINANCIAL_DATA': [],
+            'COLLEAGUE_PII': [],
+            'BANK_ACCOUNT': [],
+            'IFSC_CODE': [],
+            'SALARY_INFO': [],
+            'EMPLOYEE_ID': [],
+            'PROJECT_CODE': [],
+            'HOME_ADDRESS': [],
+            'PASSPORT': [],
+            # Multi-language categories (always included now)
+            'JP_PERSON': [],
+            'CN_PERSON': [],
+            'KR_PERSON': [],
+            'ES_DNI': [],
+            'ES_NIE': [],
+            'ES_PHONE': [],
+            'FR_NIR': [],
+            'FR_PHONE': [],
+            'DE_TAX_ID': [],
+            'DE_PHONE': [],
+            'CN_ID': [],
+            'CN_PHONE': [],
+            'JP_PHONE': [],
+            'BR_CPF': [],
+            'PT_PHONE': [],  # Portuguese phone numbers
+        }
+        logger.info(f"✓ PII Guard initialized for language: {language}")
+        logger.info(f"✓ Auto-detect language: {auto_detect_language}")
         logger.info(f"✓ PII Guard initialized for language: {language}")
         logger.info(f"✓ Auto-detect language: {auto_detect_language}")
     
@@ -1958,7 +1996,7 @@ class ContextAwarePIIGuard:
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
 
-        if not any (r.entity_type == 'PERSON' for r in results):
+        if self.language == 'en' and not any (r.entity_type == "PERSON" for r in results):
             normalized_text = text.title()
             normalized_results = self.analyzer.analyze(text=normalized_text, language=self.language)
             for result in normalized_results:
@@ -2044,11 +2082,45 @@ class ContextAwarePIIGuard:
                 self.kept_entities.add(entity_text)
                 logger.info(f"KEEPING: {entity_text} at position {position} - {classification}")
                 continue
-            
+
+            should_redact = False
+            multi_language_types = [
+                'JP_PERSON', 'CN_PERSON', 'KR_PERSON',
+                'ES_DNI', 'ES_NIE', 'ES_PHONE',
+                'FR_NIR', 'FR_PHONE',
+                'DE_TAX_ID', 'DE_PHONE',
+                'CN_ID', 'CN_PHONE',
+                'JP_PHONE',
+                'BR_CPF', 'PT_PHONE'
+            ]
+
+            if self.language == 'en':
+                if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
+                'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
+                    should_redact = True
+            else:
             # Redact USER_PII and THIRD_PARTY_PII
-            if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                    'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID'] or \
-                result.entity_type in ['JP_PERSON', 'CN_PERSON', 'KR_PERSON']:
+                if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
+                        'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID'] or \
+                    result.entity_type in ['JP_PERSON', 'CN_PERSON', 'KR_PERSON','ES_DNI', 'ES_NIE', 'ES_PHONE',
+                                    'FR_NIR', 'FR_PHONE', 
+                                    'DE_TAX_ID', 'DE_PHONE',
+                                    'CN_ID', 'CN_PHONE',
+                                    'JP_PHONE', 
+                                    'BR_CPF', 'PT_PHONE']:
+                    should_redact = True
+            
+            if should_redact:
+                logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
+                filtered_results.append(result)
+                category = classification if classification in self.redaction_summary else result.entity_type
+                if category in self.redaction_summary:
+                    self.redaction_summary[category].append({
+                        'text': entity_text,
+                        'type': result.entity_type,
+                        'reason': classification,
+                        'position': position
+                    })
                 
                 logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
                 filtered_results.append(result)
