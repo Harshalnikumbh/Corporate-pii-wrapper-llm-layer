@@ -19,10 +19,8 @@ from dotenv import load_dotenv
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, List
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, Pattern, PatternRecognizer
-from thinc import registry
             
 # Robust retry decorator
 def retry_on_failure(max_retries=3, delay=1):
@@ -241,71 +239,83 @@ class ContextAwareClassifier:
 
         prompt = f"""You are a CORPORATE DATA SECURITY expert analyzing text from a company employee to prevent data leaks.
 
-    CONTEXT: This is from a corporate environment. Your job is to protect:
-    - Employee personal information
-    - Client/customer data
-    - Financial information
-    - Project codes and proprietary information
+CONTEXT: This is from a corporate environment. Your job is to protect:
+- Employee personal information
+- Client/customer data
+- Financial information
+- Project codes and proprietary information
 
-    TEXT TO ANALYZE:
-    {text}
+TEXT TO ANALYZE:
+{text}
 
-    DETECTED ENTITIES WITH CONTEXT:
-    {chr(10).join(entity_list)}
+DETECTED ENTITIES WITH CONTEXT:
+{chr(10).join(entity_list)}
 
-    CLASSIFY EACH ENTITY INTO ONE CATEGORY:
+CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 
-    1. **EMPLOYEE_PII** - Employee's own sensitive information
-    - **CRITICAL: Look for "I am [NAME]", "My name is [NAME]", "I'm [NAME]"**
-    - If NAME appears after these phrases → EMPLOYEE_PII
-    - Examples:
-        * "I am Harshal" → Harshal is EMPLOYEE_PII
-        * "My employee id is EMP-55621" → EMP-55621 is EMPLOYEE_PII
+1. **EMPLOYEE_PII** - Employee's own sensitive information
+- **CRITICAL: Look for "I am [NAME]", "My name is [NAME]", "I'm [NAME]", "Eu sou [NAME]"**
+- If NAME appears after these phrases → EMPLOYEE_PII
+- Examples:
+    * "I am Harshal" → Harshal is EMPLOYEE_PII
+    * "My employee id is EMP-55621" → EMP-55621 is EMPLOYEE_PII
 
-    2. **COLLEAGUE_PII** - Other employees/colleagues mentioned
-    - **Look for "my friend [NAME]", "my colleague [NAME]", "with [NAME]"**
-    - If NAME appears after these phrases → COLLEAGUE_PII
-    - NOT the speaker, but other people
-    - Examples:
-        * "my friend Amit" → Amit is COLLEAGUE_PII
-        * "my colleague Harshal" → Harshal is COLLEAGUE_PII
+2. **COLLEAGUE_PII** - Other employees/colleagues mentioned
+- **Look for "my friend [NAME]", "my colleague [NAME]", "with [NAME]"**
+- **DEFAULT: ANY PERSON NAME that is NOT a public figure → COLLEAGUE_PII**
+- If NAME appears after these phrases → COLLEAGUE_PII
+- NOT the speaker, but other people
+- Examples:
+    * "my friend Amit" → Amit is COLLEAGUE_PII
+    * "my colleague Harshal" → Harshal is COLLEAGUE_PII
+    * "Carlos está jogando" → Carlos is COLLEAGUE_PII (unknown person)
 
-    3. **CLIENT_SENSITIVE** - Client/customer/vendor information
-    - **Look for "Our client [NAME]", "Client: [NAME]"**
-    - Customer contact details, addresses
-    - Examples:
-        * "Our client Ankit Verma" → Ankit Verma is CLIENT_SENSITIVE
+3. **CLIENT_SENSITIVE** - Client/customer/vendor information
+- **Look for "Our client [NAME]", "Client: [NAME]"**
+- Customer contact details, addresses
+- Examples:
+    * "Our client Ankit Verma" → Ankit Verma is CLIENT_SENSITIVE
 
-    4. **PUBLIC_FIGURE** - Famous people/large organizations
-    - Celebrities, politicians, tech leaders
-    - Fortune 500 companies
-    - Examples: "Elon Musk", "Google", "Microsoft"
+4. **PUBLIC_FIGURE** - Famous people/large organizations
+- Celebrities, politicians, tech leaders
+- Fortune 500 companies
+- Examples: "Elon Musk", "Google", "Microsoft", "Pokémon" (game/company)
+- **ONLY classify as PUBLIC_FIGURE if you are 100% certain they are famous**
 
-    5. **FINANCIAL_DATA** - Money-related info
-    - Bank accounts, IFSC codes, salary
+5. **FINANCIAL_DATA** - Money-related info
+- Bank accounts, IFSC codes, salary
 
-    6. **EMPLOYEE_ID** - Employee codes
-    - "EMP-55621", "STAFF-12345"
+6. **EMPLOYEE_ID** - Employee codes
+- "EMP-55621", "STAFF-12345"
 
-    7. **PROJECT_CODE** - Project identifiers
-    - "PROJ-12345"
+7. **PROJECT_CODE** - Project identifiers
+- "PROJ-12345"
 
-    8. **KEEP** - Safe generic terms
-    - Job titles, cities, countries
+8. **KEEP** - Safe generic terms ONLY
+- Job titles, cities, countries
+- Common words like "telefone", "email", "phone"
+- **DO NOT use KEEP for person names unless they are public figures**
 
-    🔥 CRITICAL RULES FOR SAME NAME:
-    1. **"I am [NAME]"** → NAME = EMPLOYEE_PII
-    2. **"my friend [NAME]"** → NAME = COLLEAGUE_PII  
-    3. **SAME NAME CAN HAVE DIFFERENT CLASSIFICATIONS BASED ON CONTEXT**
-    4. Check the surrounding words carefully for each occurrence
+🔥 CRITICAL RULES:
+1. **"I am [NAME]" or "Eu sou [NAME]"** → NAME = EMPLOYEE_PII
+2. **"my friend [NAME]"** → NAME = COLLEAGUE_PII  
+3. **ANY unknown person name → COLLEAGUE_PII** (default for safety)
+4. **Only use PUBLIC_FIGURE for famous/well-known people**
+5. **When in doubt about a name → classify as COLLEAGUE_PII**
+6. **SAME NAME CAN HAVE DIFFERENT CLASSIFICATIONS BASED ON CONTEXT**
 
-    Example:
-    Text: "I am Harshal and this is my friend Harshal"
-    Entity 1: "Harshal" after "I am" → EMPLOYEE_PII
-    Entity 2: "Harshal" after "my friend" → COLLEAGUE_PII
+Example:
+Text: "I am Harshal and this is my friend Harshal"
+Entity 1: "Harshal" after "I am" → EMPLOYEE_PII
+Entity 2: "Harshal" after "my friend" → COLLEAGUE_PII
 
-    Respond ONLY with JSON mapping entity number to classification:
-    {{"1": "EMPLOYEE_PII", "2": "COLLEAGUE_PII"}}"""
+Example 2:
+Text: "Carlos está jogando Pokémon"
+Entity 1: "Carlos" (unknown person) → COLLEAGUE_PII
+Entity 2: "Pokémon" (famous game) → PUBLIC_FIGURE
+
+Respond ONLY with JSON mapping entity number to classification:
+{{"1": "EMPLOYEE_PII", "2": "COLLEAGUE_PII"}}"""
 
         try:
             response = self.groq_client.chat.completions.create(
@@ -1785,7 +1795,7 @@ class ContextAwarePIIGuard:
         registry.add_recognizer(MultilingualPIIRecognizers.create_french_nir_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_french_phone_recognizer())
 
-            # German
+        # German
         registry.add_recognizer(MultilingualPIIRecognizers.create_german_tax_id_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_german_phone_recognizer())
 
@@ -1796,6 +1806,7 @@ class ContextAwarePIIGuard:
 
         # Korean
         registry.add_recognizer(MultilingualPIIRecognizers.create_korean_name_recognizer())
+
         # Japanese
         registry.add_recognizer(MultilingualPIIRecognizers.create_japanese_phone_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_japanese_name_recognizer())
@@ -1803,6 +1814,11 @@ class ContextAwarePIIGuard:
         # portuguese
         registry.add_recognizer(MultilingualPIIRecognizers.create_portuguese_cpf_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_portuguese_phone_recognizer())
+
+        # Spanish
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_dni_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_nie_recognizer())
+        registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_phone_recognizer())
 
 
         self.analyzer = AnalyzerEngine(
@@ -1992,7 +2008,20 @@ class ContextAwarePIIGuard:
         
         detected_language = self.detect_and_switch_language(text)
         logger.info(f"Using language for analysis: {detected_language}")
-        
+
+        language_entity_map = {
+            'es': ['ES_DNI', 'ES_NIE', 'ES_PHONE'],
+            'fr': ['FR_NIR', 'FR_PHONE'],
+            'de': ['DE_TAX_ID', 'DE_PHONE'],
+            'zh-cn': ['CN_ID', 'CN_PHONE', 'CN_PERSON'],
+            'ja': ['JP_PHONE', 'JP_PERSON'],
+            'ko': ['KR_PERSON'],
+            'pt': ['BR_CPF', 'PT_PHONE']
+                }
+        expected_entities = language_entity_map.get(detected_language, [])
+        if expected_entities:
+            logger.info(f"Expected multilingual entity types: {expected_entities}")
+
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
 
@@ -2094,21 +2123,13 @@ class ContextAwarePIIGuard:
                 'BR_CPF', 'PT_PHONE'
             ]
 
-            if self.language == 'en':
-                if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
-                    should_redact = True
-            else:
-            # Redact USER_PII and THIRD_PARTY_PII
-                if classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                        'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID'] or \
-                    result.entity_type in ['JP_PERSON', 'CN_PERSON', 'KR_PERSON','ES_DNI', 'ES_NIE', 'ES_PHONE',
-                                    'FR_NIR', 'FR_PHONE', 
-                                    'DE_TAX_ID', 'DE_PHONE',
-                                    'CN_ID', 'CN_PHONE',
-                                    'JP_PHONE', 
-                                    'BR_CPF', 'PT_PHONE']:
-                    should_redact = True
+            if result.entity_type in multi_language_types:
+                should_redact = True
+                logger.info(f"Redacting Muilti language {entity_text} ({result.entity_type}) at position {position}")
+
+            elif classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
+                        'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
+                        should_redact = True
             
             if should_redact:
                 logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
@@ -2622,7 +2643,20 @@ class ProductionImageRedactor:
         # OCR
         try:
             import easyocr
-            self.ocr_reader = easyocr.Reader(['en','mr','hi'], gpu=False)
+            self.ocr_reader = easyocr.Reader([
+                'en',      # English
+                'hi',      # Hindi
+                'mr',      # Marathi
+                'es',      # Spanish
+                'fr',      # French
+                'de',      # German
+                'zh_sim',  # Chinese Simplified
+                'zh_tra',  # Chinese Traditional
+                'ja',      # Japanese
+                'ko',      # Korean
+                'pt'       # Portuguese
+            ], gpu=False)
+            logger.info("✓ EasyOCR initialized with multilingual support (11 languages)")
             self.ocr_available = True
             logger.info("[OK] EasyOCR initialized successfully")
         except Exception as e:
@@ -2635,7 +2669,7 @@ class ProductionImageRedactor:
         h, w = img_cv.shape[:2]
         
         validation = {
-            'is_valid': True,
+            'is_valid': True,   
             'warnings': [],
             'resolution': (w, h)
         }
@@ -2936,8 +2970,11 @@ class ProductionImageRedactor:
             if confidence < min_conf:
                 continue
             
+            detected_lang = self.pii_guard.detect_and_switch_language(text)
+            logger.debug(f"OCR text detected language: {detected_lang}")
+
             # Check for PII
-            anonymized = self.pii_guard.anonymize(text, context_aware=False)
+            anonymized = self.pii_guard.anonymize(text, context_aware=True)
             
             if text != anonymized:  # PII found
                 top_left = tuple(map(int, bbox[0]))
