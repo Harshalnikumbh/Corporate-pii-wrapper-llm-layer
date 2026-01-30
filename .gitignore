@@ -34,3 +34,9 @@ __pycache__/
 .venv
 uploads/
 .gitignore
+vapt.py
+wapt_results.xlsx
+.gitignore
+auto.py
+pdf_automation.log
+*.png
