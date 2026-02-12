@@ -2538,8 +2538,8 @@ class SpreadsheetHandler:
     def __init__(self, pii_guard: ContextAwarePIIGuard):
         self.pii_guard = pii_guard
     
-    def process_excel(self, file_path: str, output_path: str = None) -> Dict:
-        """Process Excel file and redact PII"""
+    def process_excel(self, file_path: str, output_path: str = None, columns_to_redact: List[str] = None) -> Dict:
+        """Process Excel file and redact PII in specified columns (or all columns if None)"""
         logger.info(f"Processing Excel file: {file_path}")
         
         if not output_path:
@@ -2550,28 +2550,82 @@ class SpreadsheetHandler:
         stats = {
             'sheets_processed': 0,
             'cells_redacted': 0,
-            'pii_found': {}
+            'pii_found': {},
+            'columns_redacted': []
         }
         
         for sheet_name in workbook.sheetnames:
             sheet = workbook[sheet_name]
             stats['sheets_processed'] += 1
             
-            for row in sheet.iter_rows():
-                for cell in row:
-                    if cell.value and isinstance(cell.value, str):
-                        original = cell.value
-                        anonymized = self.pii_guard.anonymize(original)
-                        
-                        if original != anonymized:
-                            cell.value = anonymized
-                            stats['cells_redacted'] += 1
+            logger.info(f"Processing sheet: {sheet_name}")
+            
+            # Get header row
+            header_row = None
+            for row in sheet.iter_rows(min_row=1, max_row=1):
+                header_row = row
+                break
+            
+            if not header_row:
+                logger.warning(f"No header row found in sheet: {sheet_name}")
+                continue
+            
+            # Determine which columns to process
+            if columns_to_redact:
+                # User specified columns - find their indices
+                column_indices_to_redact = []
+                for col_idx, cell in enumerate(header_row, start=1):
+                    if cell.value and str(cell.value).strip().upper() in [col.upper() for col in columns_to_redact]:
+                        column_indices_to_redact.append(col_idx)
+                        column_name = str(cell.value).strip()
+                        stats['columns_redacted'].append(column_name)
+                        logger.info(f"✓ Will redact column: '{column_name}' (index {col_idx})")
+            else:
+                # NO columns specified - scan ALL columns for PII
+                column_indices_to_redact = list(range(1, len(header_row) + 1))
+                logger.info(f"⚠ No columns specified - scanning ALL {len(column_indices_to_redact)} columns for PII")
+            
+            # Process data rows (skip header)
+            for row_idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
+                for col_idx, cell in enumerate(row, start=1):
+                    # Process this column if it's in our list
+                    if col_idx in column_indices_to_redact:
+                        if cell.value and isinstance(cell.value, (str, int, float)):
+                            original = str(cell.value).strip()
+                            
+                            # Skip empty cells
+                            if not original or original == '0':
+                                continue
+                            
+                            # Get column name for logging
+                            column_name = str(header_row[col_idx-1].value).strip() if header_row[col_idx-1].value else f"Col{col_idx}"
+                            
+                            # Use PII guard to detect and anonymize
+                            try:
+                                anonymized = self.pii_guard.anonymize(original, context_aware=False)
+                                
+                                # Check if anything was redacted
+                                if original != anonymized:
+                                    cell.value = anonymized
+                                    stats['cells_redacted'] += 1
+                                    logger.info(f"✓ Redacted [{sheet_name}] Row {row_idx}, '{column_name}': '{original}' → '{anonymized}'")
+                                    
+                                    # Track which columns had PII
+                                    if column_name not in stats['columns_redacted']:
+                                        stats['columns_redacted'].append(column_name)
+                            except Exception as e:
+                                logger.error(f"Error processing cell [{sheet_name}] Row {row_idx}, '{column_name}': {e}")
         
         # Save redacted workbook
         workbook.save(output_path)
-        logger.info(f"Saved redacted Excel: {output_path}")
+        logger.info(f"✅ Saved redacted Excel: {output_path}")
         
+        # Get all detected PII entities
         stats['pii_found'] = dict(self.pii_guard.reverse_mapping)
+        
+        logger.info(f"📊 SUMMARY: Redacted {stats['cells_redacted']} cells across {stats['sheets_processed']} sheet(s)")
+        logger.info(f"📊 Columns with PII: {', '.join(stats['columns_redacted'])}")
+        
         return {
             'type': 'excel',
             'input_file': file_path,
@@ -2579,45 +2633,7 @@ class SpreadsheetHandler:
             'stats': stats,
             'timestamp': datetime.now().isoformat()
         }
-    
-    def process_csv(self, file_path: str, output_path: str = None) -> Dict:
-        """Process CSV file and redact PII"""
-        logger.info(f"Processing CSV file: {file_path}")
         
-        if not output_path:
-            output_path = file_path.replace('.csv', '_REDACTED.csv')
-        
-        df = pd.read_csv(file_path)
-        original_shape = df.shape
-        cells_redacted = 0
-        
-        for col in df.columns:
-            if df[col].dtype == 'object':  # Text columns
-                for idx in df.index:
-                    if pd.notna(df.at[idx, col]):
-                        original = str(df.at[idx, col])
-                        anonymized = self.pii_guard.anonymize(original)
-                        
-                        if original != anonymized:
-                            df.at[idx, col] = anonymized
-                            cells_redacted += 1
-        
-        df.to_csv(output_path, index=False)
-        logger.info(f"Saved redacted CSV: {output_path}")  
-        
-        return {
-            'type': 'csv',
-            'input_file': file_path,
-            'output_file': output_path,
-            'stats': {
-                'rows': original_shape[0],
-                'columns': original_shape[1],
-                'cells_redacted': cells_redacted,
-                'pii_found': dict(self.pii_guard.reverse_mapping)
-            },
-            'timestamp': datetime.now().isoformat()
-        }
-    
 #  PRODUCTION-GRADE IMAGE REDACTOR 
 class ProductionImageRedactor:
     """Production-grade image redaction with policy enforcement and audit trails"""
@@ -3031,7 +3047,7 @@ class ProductionImageRedactor:
                     'bbox': (x, y, w, h)
                 })
                 log['redactions'].append({
-                    'method': method.value,
+                    'method': method.value,     
                     'severity': 'MEDIUM',
                     'reason': 'Client logo (NDA compliance)',
                     'compliance': 'Confidentiality agreements'
