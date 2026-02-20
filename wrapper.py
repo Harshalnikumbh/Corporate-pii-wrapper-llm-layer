@@ -1006,7 +1006,7 @@ class IDDocumentDetector:
                         'text': text_clean
                     })
                     processed_indices.add(idx)
-                    logger.info(f"✓ ADDRESS detected")
+                    logger.info(f"✓ ADDRESS detected: {text_clean}")
                     continue
         
         logger.info(f"TOTAL DETECTED: {len(pii_fields)} PII fields")
@@ -1150,16 +1150,10 @@ class IDDocumentDetector:
         # h, w = image_cv.shape[:2]
         return []
         
-        # return [{
-        #     'field_type': 'signature',
-        #     'bbox': (int(w * 0.05), int(h * 0.70), int(w * 0.45), int(h * 0.20)),
-        #     'text': 'SIGNATURE_FALLBACK',
-        #     'confidence': 0.60
-        # }]
             
     def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
         """Find bounding box containing ID document keywords"""
-        # THIS METHOD IS NO LONGER USED - we detect individual fields now
+        
         pass
 
 # ML-BASED SIGNATURE DETECTOR WITH PRE-TRAINED MODEL
@@ -2450,33 +2444,7 @@ class ContextAwarePIIGuard:
 
     def _build_mapping(self, original: str, anonymized: str, results):
         """Build mapping ensuring unique placeholders for unique entities"""
-        # entity_counters = {}  # Track unique counter per entity value
         
-        # for result in results:
-        #     original_value = original[result.start:result.end]
-        #     entity_type = result.entity_type
-            
-        #     # Check if this exact value already has a placeholder
-        #     if original_value in self.mapping:
-        #         # Already mapped, skip
-        #         continue
-            
-        #     # Find the corresponding placeholder in anonymized text
-        #     pattern = f"<{entity_type}_\\d+>"
-        #     matches = list(re.finditer(pattern, anonymized))
-            
-        #     for match in matches:
-        #         placeholder = match.group()
-                
-        #         # If this placeholder is already used, skip it
-        #         if placeholder in self.reverse_mapping:
-        #             continue
-                
-        #         # Assign this placeholder to the original value
-        #         self.reverse_mapping[placeholder] = original_value
-        #         self.mapping[original_value] = placeholder
-                
-        #         logger.debug(f"Mapped: {original_value} → {placeholder}")
         pass
     
     def deanonymize(self, text: str) -> str:
@@ -2532,26 +2500,71 @@ class ContextAwarePIIGuard:
         # For other entities, use standard format
         return f"<{entity_type}_{unique_number}>"
 
-# Excel/CSV Handler
+# Excel/CSV Handler - FIXED VERSION
 class SpreadsheetHandler:
     
-    def __init__(self, pii_guard: ContextAwarePIIGuard):
+    def __init__(self, pii_guard: 'ContextAwarePIIGuard'):
         self.pii_guard = pii_guard
+        
+        # Business semantics - column type definitions
+        self.column_semantics = {
+            'SAFE_NUMERIC': ['income', 'salary', 'sal', 'amount', 'revenue', 'profit', 'loss', 'quantity', 'count', 'age'],
+            'PII_PERSONAL': ['name', 'full name', 'first name', 'last name', 'employee name'],
+            'PII_CONTACT': ['mobile', 'phone', 'telephone', 'email', 'contact'],
+            'PII_IDENTITY': ['pan', 'aadhaar', 'passport', 'employee id', 'emp id', 'staff id'],
+            'PII_LOCATION': ['address', 'street', 'city', 'state', 'pincode', 'pin', 'zip'],
+        }
+        
+        # Column-specific entity type mapping
+        self.column_entity_map = {
+            'mobile': ['INDIAN_PHONE', 'PHONE_NUMBER'],
+            'phone': ['INDIAN_PHONE', 'PHONE_NUMBER'],
+            'email': ['EMAIL_ADDRESS'],
+            'pan': ['PAN_NUMBER'],
+            'aadhaar': ['AADHAAR_NUMBER'],
+            'pincode': ['PIN_CODE'],
+            'pin': ['PIN_CODE'],
+            'address': ['LOCATION', 'HOME_ADDRESS'],
+        }
     
-    def process_excel(self, file_path: str, output_path: str = None, columns_to_redact: List[str] = None) -> Dict:
-        """Process Excel file and redact PII in specified columns (or all columns if None)"""
+    def process_excel(self, file_path: str, output_path: str = None, 
+                  columns_to_redact: list = None,
+                  exclude_columns: list = None,
+                  enable_column_semantics: bool = True) -> dict:
+        """
+        Process Excel file with column-aware business semantics.
+        
+        Args:
+            file_path: Input Excel file
+            output_path: Output file path
+            columns_to_redact: Specific columns to redact (if None, auto-detect)
+            exclude_columns: Columns to NEVER redact (e.g., ['INCOME', 'SAL'])
+            enable_column_semantics: Use business logic to understand column types
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         logger.info(f"Processing Excel file: {file_path}")
         
         if not output_path:
             output_path = file_path.replace('.xlsx', '_REDACTED.xlsx').replace('.xls', '_REDACTED.xls')
         
+        # Normalize exclude list
+        exclude_columns_normalized = []
+        if exclude_columns:
+            exclude_columns_normalized = [col.strip().upper() for col in exclude_columns]
+            logger.info(f"📌 EXCLUDED COLUMNS (will NOT redact): {exclude_columns_normalized}")
+        
         # Read Excel
+        import openpyxl
         workbook = openpyxl.load_workbook(file_path)
         stats = {
             'sheets_processed': 0,
             'cells_redacted': 0,
+            'cells_skipped_safe': 0,
             'pii_found': {},
-            'columns_redacted': []
+            'columns_redacted': [],
+            'columns_excluded': exclude_columns_normalized
         }
         
         for sheet_name in workbook.sheetnames:
@@ -2570,51 +2583,109 @@ class SpreadsheetHandler:
                 logger.warning(f"No header row found in sheet: {sheet_name}")
                 continue
             
+            # Build column metadata
+            column_metadata = {}
+            for col_idx, cell in enumerate(header_row, start=1):
+                if cell.value:
+                    col_name = str(cell.value).strip()
+                    col_name_upper = col_name.upper()
+                    
+                    # Determine column type
+                    col_type = self._classify_column_type(col_name) if enable_column_semantics else 'UNKNOWN'
+                    
+                    # Check if excluded
+                    is_excluded = col_name_upper in exclude_columns_normalized
+                    
+                    # Determine allowed entity types for this column
+                    allowed_entities = self._get_allowed_entities_for_column(col_name) if enable_column_semantics else None
+                    
+                    column_metadata[col_idx] = {
+                        'name': col_name,
+                        'name_upper': col_name_upper,
+                        'type': col_type,
+                        'is_excluded': is_excluded,
+                        'allowed_entities': allowed_entities
+                    }
+                    
+                    if is_excluded:
+                        logger.info(f"🚫 Column '{col_name}' is EXCLUDED - will skip redaction")
+            
             # Determine which columns to process
             if columns_to_redact:
                 # User specified columns - find their indices
                 column_indices_to_redact = []
-                for col_idx, cell in enumerate(header_row, start=1):
-                    if cell.value and str(cell.value).strip().upper() in [col.upper() for col in columns_to_redact]:
+                columns_to_redact_upper = [col.strip().upper() for col in columns_to_redact]
+                
+                for col_idx, meta in column_metadata.items():
+                    if meta['name_upper'] in columns_to_redact_upper and not meta['is_excluded']:
                         column_indices_to_redact.append(col_idx)
-                        column_name = str(cell.value).strip()
-                        stats['columns_redacted'].append(column_name)
-                        logger.info(f"✓ Will redact column: '{column_name}' (index {col_idx})")
+                        stats['columns_redacted'].append(meta['name'])
+                        logger.info(f"✓ Will redact column: '{meta['name']}' (index {col_idx})")
             else:
-                # NO columns specified - scan ALL columns for PII
-                column_indices_to_redact = list(range(1, len(header_row) + 1))
-                logger.info(f"⚠ No columns specified - scanning ALL {len(column_indices_to_redact)} columns for PII")
+                # NO columns specified - scan ALL columns EXCEPT excluded ones
+                column_indices_to_redact = []
+                for col_idx, meta in column_metadata.items():
+                    if not meta['is_excluded']:
+                        # Only process columns that are likely PII
+                        if enable_column_semantics and meta['type'] == 'SAFE_NUMERIC':
+                            logger.info(f"⏭️  Skipping '{meta['name']}' - detected as safe numeric column")
+                            continue
+                        column_indices_to_redact.append(col_idx)
+                
+                logger.info(f"⚠ No columns specified - scanning {len(column_indices_to_redact)} columns for PII")
             
             # Process data rows (skip header)
             for row_idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
                 for col_idx, cell in enumerate(row, start=1):
-                    # Process this column if it's in our list
-                    if col_idx in column_indices_to_redact:
-                        if cell.value and isinstance(cell.value, (str, int, float)):
-                            original = str(cell.value).strip()
+                    # Skip if column not in processing list
+                    if col_idx not in column_indices_to_redact:
+                        continue
+                    
+                    # Skip if column is excluded
+                    if col_idx in column_metadata and column_metadata[col_idx]['is_excluded']:
+                        stats['cells_skipped_safe'] += 1
+                        continue
+                    
+                    if cell.value and isinstance(cell.value, (str, int, float)):
+                        original = str(cell.value).strip()
+                        
+                        # Skip empty cells or zeros
+                        if not original or original == '0':
+                            continue
+                        
+                        # Get column metadata
+                        col_meta = column_metadata.get(col_idx, {})
+                        column_name = col_meta.get('name', f"Col{col_idx}")
+                        col_type = col_meta.get('type', 'UNKNOWN')
+                        allowed_entities = col_meta.get('allowed_entities')
+                        
+                        # CRITICAL: Skip safe numeric columns
+                        if col_type == 'SAFE_NUMERIC':
+                            logger.debug(f"⏭️  Skipping safe numeric value in '{column_name}': {original}")
+                            stats['cells_skipped_safe'] += 1
+                            continue
+                        
+                        # Use PII guard to detect and anonymize
+                        try:
+                            # Detect PII with column context
+                            anonymized = self._redact_with_column_context(
+                                original, 
+                                column_name, 
+                                allowed_entities,
+                                enable_column_semantics
+                            )
                             
-                            # Skip empty cells
-                            if not original or original == '0':
-                                continue
-                            
-                            # Get column name for logging
-                            column_name = str(header_row[col_idx-1].value).strip() if header_row[col_idx-1].value else f"Col{col_idx}"
-                            
-                            # Use PII guard to detect and anonymize
-                            try:
-                                anonymized = self.pii_guard.anonymize(original, context_aware=False)
+                            # Check if anything was redacted
+                            if original != anonymized:
+                                cell.value = anonymized
+                                stats['cells_redacted'] += 1
+                                logger.info(f"✓ Redacted [{sheet_name}] Row {row_idx}, '{column_name}': '{original}' → '{anonymized}'")
                                 
-                                # Check if anything was redacted
-                                if original != anonymized:
-                                    cell.value = anonymized
-                                    stats['cells_redacted'] += 1
-                                    logger.info(f"✓ Redacted [{sheet_name}] Row {row_idx}, '{column_name}': '{original}' → '{anonymized}'")
-                                    
-                                    # Track which columns had PII
-                                    if column_name not in stats['columns_redacted']:
-                                        stats['columns_redacted'].append(column_name)
-                            except Exception as e:
-                                logger.error(f"Error processing cell [{sheet_name}] Row {row_idx}, '{column_name}': {e}")
+                                # Track which columns had PII
+                                if column_name not in stats['columns_redacted']:
+                                    stats['columns_redacted'].append(column_name)
+                        except Exception as e:
+                            logger.error(f"Error processing cell [{sheet_name}] Row {row_idx}, '{column_name}': {e}")
         
         # Save redacted workbook
         workbook.save(output_path)
@@ -2623,9 +2694,14 @@ class SpreadsheetHandler:
         # Get all detected PII entities
         stats['pii_found'] = dict(self.pii_guard.reverse_mapping)
         
-        logger.info(f"📊 SUMMARY: Redacted {stats['cells_redacted']} cells across {stats['sheets_processed']} sheet(s)")
-        logger.info(f"📊 Columns with PII: {', '.join(stats['columns_redacted'])}")
+        logger.info(f"📊 SUMMARY:")
+        logger.info(f"   - Redacted: {stats['cells_redacted']} cells")
+        logger.info(f"   - Skipped (safe): {stats['cells_skipped_safe']} cells")
+        logger.info(f"   - Sheets: {stats['sheets_processed']}")
+        logger.info(f"   - Columns with PII: {', '.join(stats['columns_redacted'])}")
+        logger.info(f"   - Excluded columns: {', '.join(stats['columns_excluded'])}")
         
+        from datetime import datetime
         return {
             'type': 'excel',
             'input_file': file_path,
@@ -2633,7 +2709,72 @@ class SpreadsheetHandler:
             'stats': stats,
             'timestamp': datetime.now().isoformat()
         }
+    
+    def _classify_column_type(self, column_name: str) -> str:
+        """
+        Classify column type based on business semantics.
+        Returns: SAFE_NUMERIC | PII_PERSONAL | PII_CONTACT | PII_IDENTITY | PII_LOCATION | UNKNOWN
+        """
+        col_lower = column_name.lower().strip()
         
+        # Check each category
+        for category, keywords in self.column_semantics.items():
+            if any(keyword in col_lower for keyword in keywords):
+                return category
+        
+        return 'UNKNOWN'
+    
+    def _get_allowed_entities_for_column(self, column_name: str) -> list:
+        """
+        Get allowed PII entity types for a specific column.
+        Returns: List of entity types that should be detected, or None for all
+        """
+        col_lower = column_name.lower().strip()
+        
+        # Check if column matches known patterns
+        for col_pattern, entities in self.column_entity_map.items():
+            if col_pattern in col_lower:
+                return entities
+        
+        # For NAME columns, only detect PERSON entities
+        if any(keyword in col_lower for keyword in ['name', 'employee', 'customer', 'client']):
+            return ['PERSON']
+        
+        # Default: allow all entity types
+        return None
+    
+    def _redact_with_column_context(self, text: str, column_name: str, 
+                                    allowed_entities: list = None,
+                                    enable_semantics: bool = True) -> str:
+        """
+        Redact text with column-aware context.
+        Only redacts entity types that match the column's purpose.
+        """
+        if not enable_semantics or allowed_entities is None:
+            # No restrictions - use default PII detection
+            return self.pii_guard.anonymize(text, context_aware=False)
+        
+        # Detect all PII
+        results = self.pii_guard.analyzer.analyze(text=text, language=self.pii_guard.language)
+        
+        # Filter to only allowed entity types for this column
+        filtered_results = [r for r in results if r.entity_type in allowed_entities]
+        
+        if not filtered_results:
+            # No matching PII for this column type
+            return text
+        
+        # Build anonymization using only filtered results
+        from presidio_anonymizer import AnonymizerEngine
+        
+        anonymizer = AnonymizerEngine()
+        anonymized = anonymizer.anonymize(
+            text=text,
+            analyzer_results=filtered_results
+        )
+        
+        return anonymized.text
+
 #  PRODUCTION-GRADE IMAGE REDACTOR 
 class ProductionImageRedactor:
     """Production-grade image redaction with policy enforcement and audit trails"""
@@ -3191,7 +3332,7 @@ class GroqClient:
             temperature=0.7,
             max_tokens=1024
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content  
 
 # Main Pipeline
 class IntelligentPIIPipeline:
@@ -3483,6 +3624,30 @@ def main():
         elif choice == '4':
             logger.info("Exiting...")
             break
+
+        # After line ~1618 in main()
+        elif choice == '5':  # Add new option
+            print("\n📊 TEST: Excel Column-Aware Redaction")
+            file_path = input("Excel file path: ").strip()
+            
+            if os.path.exists(file_path):
+                # Test with exclusions
+                result = pipeline.spreadsheet_handler.process_excel(
+                    file_path=file_path,
+                    exclude_columns=['INCOME', 'SAL', 'SALARY', 'AMOUNT', 'REVENUE'],
+                    enable_column_semantics=True
+                )
+                
+                print("\n✅ REDACTION COMPLETE")
+                print(f"📊 Stats:")
+                print(f"   - Cells redacted: {result['stats']['cells_redacted']}")
+                print(f"   - Cells skipped (safe): {result['stats']['cells_skipped_safe']}")
+                print(f"   - Excluded columns: {result['stats']['columns_excluded']}")
+                print(f"   - Output: {result['output_file']}")
+                
+                save_results(result)
+            else:
+                logger.error("File not found")
 
 if __name__ == "__main__":
     config = Config(groq_api_key=os.getenv("GROQ_API_KEY"))
