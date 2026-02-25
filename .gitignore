@@ -40,3 +40,4 @@ wapt_results.xlsx
 auto.py
 pdf_automation.log
 *.png
+*.xlsx

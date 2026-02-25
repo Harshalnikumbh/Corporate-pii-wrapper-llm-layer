@@ -140,6 +140,20 @@ class RedactionPolicy:
                                'PASSPORT', 'EMPLOYEE_ID'],
                             'reason': 'OCR-detected PII'
             },
+
+            'medical_data': {
+                'enabled': True,
+                'severity': RedactionSeverity.CRITICAL,
+                'method': RedactionMethod.BLACKOUT,
+                'entity_types': [
+                    'MEDICAL_RECORD_NUMBER', 'HEALTH_INSURANCE_ID',
+                    'PRESCRIPTION_NUMBER', 'DOCTOR_REGISTRATION_NUMBER',
+                    'DIAGNOSIS_CODE', 'LAB_REPORT_NUMBER',
+                    'DISABILITY_CERTIFICATE', 'BLOOD_TYPE'
+                ],
+                'min_confidence': 0.75,
+                'reason': 'Medical PII - HIPAA, GDPR Art. 9 (special category), DPDP Act'
+            },
             
             # CONDITIONAL REDACTION
             'client_logos': {
@@ -291,6 +305,20 @@ CLASSIFY EACH ENTITY INTO ONE CATEGORY:
 7. **PROJECT_CODE** - Project identifiers
 - "PROJ-12345"
 
+8. **MEDICAL_PII** - Health/medical information
+- Patient IDs, MRN, UHID, ABHA health IDs
+- Health insurance policy/claim numbers
+- Prescription numbers
+- ICD diagnosis codes
+- Lab/pathology report numbers
+- Doctor registration numbers (MCI, NMC, NPI)
+- Blood type when linked to a person
+- Disability certificate numbers
+- Examples:
+    * "My UHID is 1234567890" → UHID is MEDICAL_PII
+    * "Patient MRN-98765 has been discharged" → MRN-98765 is MEDICAL_PII
+    * "Diagnosis: E11.9" → E11.9 is MEDICAL_PII
+
 8. **KEEP** - Safe generic terms ONLY
 - Job titles, cities, countries
 - Common words like "telefone", "email", "phone"
@@ -315,7 +343,7 @@ Entity 1: "Carlos" (unknown person) → COLLEAGUE_PII
 Entity 2: "Pokémon" (famous game) → PUBLIC_FIGURE
 
 Respond ONLY with JSON mapping entity number to classification:
-{{"1": "EMPLOYEE_PII", "2": "COLLEAGUE_PII"}}"""
+{{"1": "EMPLOYEE_PII", "2": "COLLEAGUE_PII", "3": "MEDICAL_PII" }}"""
 
         try:
             response = self.groq_client.chat.completions.create(
@@ -429,26 +457,61 @@ class PublicEntityVerifier:
         logger.debug(f"Not a public figure: {name}")
         return False
     
-    def _check_wikipedia(self, name: str) -> bool:
-        try:
-            url = "https://en.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'format': 'json',
-                'titles': name,
-                'redirects': 1
-            }
-            response = requests.get(url, params=params, timeout=3)
-            data = response.json()
-            pages = data.get('query', {}).get('pages', {})
-            
-            for page_id in pages:
-                if page_id != '-1' and 'missing' not in pages[page_id]:
-                    return True
-            return False
-        except Exception as e:
-            logger.debug(f"Wikipedia check failed for {name}: {e}")
-            return False
+    # ---- REPLACE entire method ----
+def _check_wikipedia(self, name: str) -> bool:
+    """
+    Check Wikipedia — STRICT: only famous/notable people qualify.
+    Common names like 'Rahul Sharma' may have Wikipedia pages
+    but are NOT public figures.
+    """
+    try:
+        url = "https://en.wikipedia.org/w/api.php"
+        params = {
+            'action': 'query',
+            'format': 'json',
+            'titles': name,
+            'redirects': 1,
+            'prop': 'categories|pageprops',   # *** Get categories to validate notability ***
+        }
+        response = requests.get(url, params=params, timeout=3)
+        data = response.json()
+        pages = data.get('query', {}).get('pages', {})
+
+        for page_id, page_data in pages.items():
+            if page_id == '-1' or 'missing' in page_data:
+                return False
+
+            # *** NEW: Check if it's actually about a notable person ***
+            categories = [
+                c['title'].lower()
+                for c in page_data.get('categories', [])
+            ]
+
+            # Must have categories indicating genuine public figure
+            NOTABLE_CATEGORIES = [
+                'politicians', 'actors', 'cricketers', 'athletes',
+                'ceos', 'businesspeople', 'scientists', 'musicians',
+                'directors', 'recipients', 'awardees', 'ministers',
+                'prime ministers', 'presidents', 'births'
+            ]
+
+            is_notable = any(
+                any(cat_kw in cat for cat_kw in NOTABLE_CATEGORIES)
+                for cat in categories
+            )
+
+            if not is_notable:
+                logger.info(
+                    f"Wikipedia page exists for '{name}' but NOT notable "
+                    f"enough to be a public figure — will redact"
+                )
+                return False  # *** Don't treat as public figure ***
+
+            return True
+
+    except Exception as e:
+        logger.debug(f"Wikipedia check failed for {name}: {e}")
+        return False
     
     def _check_with_llm(self, name: str) -> bool:
         try:
@@ -709,27 +772,26 @@ class MultilingualPIIRecognizers:
     
     @staticmethod
     def create_portuguese_phone_recognizer():
-        """Portuguese/Brazilian phone numbers"""
+        """Portuguese/Brazilian phone numbers - STRICT patterns to avoid false positives"""
         patterns = [
-            # Brazil with country code: +55 11 98765-4321 or +55 11 987654321
-            Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-?\d{4}\b", 0.95),
-            
+            # Brazil with country code: +55 11 98765-4321
+            Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-\d{4}\b", 0.95),
+
             # Portugal with country code: +351 912345678
             Pattern("PT/BR Phone", r"\+351\s?\d{9}\b", 0.95),
-            
-            # Brazil without country code: 11 98765-4321 or 11987654321
-            Pattern("PT/BR Phone", r"\b\d{2}\s?\d{4,5}-?\d{4}\b", 0.90),
-            
-            # Simple format with hyphen: 99887-6655 (8 or 9 digits)
+
+            # Brazil without country code BUT with hyphen: 11 98765-4321
+            Pattern("PT/BR Phone", r"\b\d{2}\s\d{4,5}-\d{4}\b", 0.88),
+
+            # Simple format WITH hyphen only: 99887-6655
+            # *** REMOVED bare \d{8,9} and \d{2}\s?\d{4,5}-?\d{4} - too loose ***
             Pattern("PT/BR Phone", r"\b\d{4,5}-\d{4}\b", 0.85),
-            
-            # Simple format without hyphen: 998876655 (8 or 9 digits)
-            Pattern("PT/BR Phone", r"\b\d{8,9}\b", 0.75),
         ]
         return PatternRecognizer(
             supported_entity="PT_PHONE",
             patterns=patterns,
             context=["telefone", "celular", "phone", "tel", "contato", "número"]
+            # *** Added strict context requirement ***
         )
     # ========== JAPANESE NAMES ==========
     @staticmethod
@@ -1730,6 +1792,135 @@ class CorporatePIIRecognizers:
             context=["client", "customer", "vendor", "partner"]
         )
 
+# MEDICAL PII RECOGNIZERS - ADD AFTER CorporatePIIRecognizers CLASS
+
+class MedicalPIIRecognizers:
+    """Medical/Healthcare-specific PII recognizers"""
+
+    @staticmethod
+    def create_medical_record_number_recognizer():
+        """Medical Record Number (MRN) / Patient ID"""
+        patterns = [
+            Pattern("MRN",    r"\b(?:MRN|mrn|MR)[-_#]?\d{5,10}\b",                   0.95),
+            Pattern("MRN",    r"\bPatient[-_ ]?(?:ID|No|Number)[-_:\s]?\d{5,12}\b",   0.90),
+
+            # *** FIXED: handle "UHID is 1234567890" (1-5 chars gap) ***
+            Pattern("UHID",   r"\bUHID\b[\s:=\-]{0,5}\d{8,15}\b",                    0.95),
+            Pattern("UHID2",  r"(?i)(?<=UHID\s)\d{8,15}\b",                           0.90),
+
+            # *** FIXED: Full ABHA format must match completely ***
+            Pattern("ABHA",   r"\b\d{2}-\d{4}-\d{4}-\d{4}\b",                        0.95),
+            Pattern("ABHA2",  r"(?i)ABHA\b[\s:=\-]{0,5}\d{2}-\d{4}-\d{4}-\d{4}\b",  0.98),
+        ]
+        return PatternRecognizer(
+            supported_entity="MEDICAL_RECORD_NUMBER",
+            patterns=patterns,
+            context=["mrn", "patient id", "uhid", "abha", "health id",
+                     "patient number", "registration number", "opd", "ipd"]
+        )
+
+    @staticmethod
+    def create_health_insurance_recognizer():
+        """Health Insurance Policy & Claim Numbers"""
+        patterns = [
+            Pattern("Insurance Policy", r"\b[A-Z]{2,4}[-/]?\d{6,12}\b",          0.80),
+            Pattern("Insurance Claim",  r"\bClaim[-_ ]?(?:No|Number|ID)[-_:\s]?[A-Z0-9]{6,15}\b", 0.90),
+            Pattern("TPA ID",           r"\bTPA[-_ ]?ID[-_:\s]?[A-Z0-9]{5,12}\b", 0.88),  # India Third-Party Admin
+            Pattern("Ayushman",         r"\b[Pp][Mm][Jj][Aa][Yy][-_ ]?\d{8,15}\b", 0.95), # PMJAY card
+        ]
+        return PatternRecognizer(
+            supported_entity="HEALTH_INSURANCE_ID",
+            patterns=patterns,
+            context=["insurance", "policy", "claim", "tpa", "mediclaim",
+                     "coverage", "ayushman", "pmjay", "esi", "cghs"]
+        )
+
+    @staticmethod
+    def create_prescription_number_recognizer():
+        """Prescription / Rx Numbers"""
+        patterns = [
+            Pattern("Rx",  r"\b(?:Rx|RX|Prescription)[-_#:\s]?[A-Z0-9]{5,12}\b", 0.90),
+            Pattern("Rx2", r"\b[Rr]x[-_]?\d{5,10}\b",                            0.88),
+        ]
+        return PatternRecognizer(
+            supported_entity="PRESCRIPTION_NUMBER",
+            patterns=patterns,
+            context=["prescription", "rx", "medicine", "pharmacy",
+                     "drug", "medication", "chemist"]
+        )
+
+    @staticmethod
+    def create_doctor_registration_recognizer():
+        """Doctor / Physician Registration Numbers (India MCI/NMC, international)"""
+        patterns = [
+            Pattern("MCI/NMC", r"\b(?:MCI|NMC|SMC|DMC|IMC)[-_/]?\d{4,8}\b",    0.92),
+            Pattern("Reg No",  r"\b[Rr]eg(?:istration)?[-_.\s]?[Nn]o[-_.\s]?\d{4,8}\b", 0.85),
+            Pattern("NPI",     r"\bNPI[-_:\s]?\d{10}\b",                          0.95),  # US NPI
+            Pattern("GMC",     r"\bGMC[-_:\s]?\d{7}\b",                           0.92),  # UK GMC
+        ]
+        return PatternRecognizer(
+            supported_entity="DOCTOR_REGISTRATION_NUMBER",
+            patterns=patterns,
+            context=["doctor", "physician", "dr", "mci", "nmc", "medical council",
+                     "registration", "license", "npi", "gmc", "practitioner"]
+        )
+
+    @staticmethod
+    def create_icd_code_recognizer():
+        """ICD-10 / ICD-11 Diagnosis Codes (sensitive - reveals medical condition)"""
+        patterns = [
+            Pattern("ICD-10", r"\b[A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?\b",    0.80),
+            Pattern("ICD-11", r"\b[A-Z]{1,2}[0-9]{2,3}(?:\.[0-9A-Z]{1,3})?\b", 0.75),
+        ]
+        return PatternRecognizer(
+            supported_entity="DIAGNOSIS_CODE",
+            patterns=patterns,
+            context=["icd", "diagnosis", "condition", "code", "disease",
+                     "ailment", "disorder", "dx"]
+        )
+
+    @staticmethod
+    def create_lab_report_recognizer():
+        """Lab Report / Test Order Numbers"""
+        patterns = [
+            Pattern("Lab ID",  r"\b(?:Lab|LAB|LIS|SID)[-_#:\s]?[A-Z0-9]{5,14}\b", 0.88),
+            Pattern("Test ID", r"\b(?:Test|Order)[-_]?(?:ID|No|Number)[-_:\s]?[A-Z0-9]{4,12}\b", 0.85),
+        ]
+        return PatternRecognizer(
+            supported_entity="LAB_REPORT_NUMBER",
+            patterns=patterns,
+            context=["lab", "laboratory", "test", "report", "lis",
+                     "pathology", "specimen", "sample", "order"]
+        )
+
+    @staticmethod
+    def create_disability_certificate_recognizer():
+        """Disability Certificate Numbers (India UDID)"""
+        patterns = [
+            Pattern("UDID", r"\bUDID[-_:\s]?[A-Z]{2}\d{8,12}\b", 0.95),
+            Pattern("Disability Cert", r"\b(?:Disability|PWD)[-_ ]?(?:Cert|Certificate|No|ID)[-_:\s]?[A-Z0-9]{5,12}\b", 0.88),
+        ]
+        return PatternRecognizer(
+            supported_entity="DISABILITY_CERTIFICATE",
+            patterns=patterns,
+            context=["udid", "disability", "pwd", "divyang",
+                     "certificate", "handicap", "specially abled"]
+        )
+
+    @staticmethod
+    def create_blood_type_recognizer():
+        """Blood Group (in combination with identity, can be PII)"""
+        patterns = [
+            Pattern("Blood Group", r"\b(?:Blood\s+(?:Group|Type)|BG|BT)\s*[-:=]?\s*(?:A|B|AB|O)[+-]\b", 0.85),
+            Pattern("Blood Group2", r"\b(?:A|B|AB|O)\s*(?:positive|negative|pos|neg|\+|-)\b", 0.75),
+        ]
+        return PatternRecognizer(
+            supported_entity="BLOOD_TYPE",
+            patterns=patterns,
+            context=["blood group", "blood type", "bg", "rh factor",
+                     "donor", "transfusion", "typing"]
+        )
+
 # Enhanced Context-Aware PII Guard
 class ContextAwarePIIGuard:
     
@@ -1779,7 +1970,16 @@ class ContextAwarePIIGuard:
         registry.add_recognizer(CorporatePIIRecognizers.create_home_address_recognizer())
         registry.add_recognizer(CorporatePIIRecognizers.create_client_name_recognizer())
 
-
+        # Medical PII Recognizers
+        registry.add_recognizer(MedicalPIIRecognizers.create_medical_record_number_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_health_insurance_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_prescription_number_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_doctor_registration_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_icd_code_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_lab_report_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_disability_certificate_recognizer())
+        registry.add_recognizer(MedicalPIIRecognizers.create_blood_type_recognizer())
+        
         # Multi -language support can be added here
         registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_dni_recognizer())
         registry.add_recognizer(MultilingualPIIRecognizers.create_spanish_nie_recognizer())
@@ -1843,7 +2043,16 @@ class ContextAwarePIIGuard:
             'PROJECT_CODE': [],
             'HOME_ADDRESS': [],
             'PASSPORT': [],
-            # Multi-language categories (always included now)
+            # Medical categories
+            'MEDICAL_RECORD_NUMBER': [],
+            'HEALTH_INSURANCE_ID': [],
+            'PRESCRIPTION_NUMBER': [],
+            'DOCTOR_REGISTRATION_NUMBER': [],
+            'DIAGNOSIS_CODE': [],
+            'LAB_REPORT_NUMBER': [],
+            'DISABILITY_CERTIFICATE': [],
+            'BLOOD_TYPE': [],
+            # Multi-language categories
             'JP_PERSON': [],
             'CN_PERSON': [],
             'KR_PERSON': [],
@@ -1858,7 +2067,7 @@ class ContextAwarePIIGuard:
             'CN_PHONE': [],
             'JP_PHONE': [],
             'BR_CPF': [],
-            'PT_PHONE': [],  # Portuguese phone numbers
+            'PT_PHONE': [],
         }
         logger.info(f"✓ PII Guard initialized for language: {language}")
         logger.info(f"✓ Auto-detect language: {auto_detect_language}")
@@ -1898,6 +2107,8 @@ class ContextAwarePIIGuard:
             - Sensitive data in context (emails, phones, addresses)
             - Identity documents
             - Default for uncertain cases
+
+
 
             🔥 CRITICAL RULES:
             - If the query is ABOUT a name/word itself (not a person) → TRANSFORMATION_ALLOWED
@@ -2074,6 +2285,24 @@ class ContextAwarePIIGuard:
                 entity_text = entity['text']
                 position = entity['start']
                 classification = position_based_classifications.get(position, 'KEEP')
+
+                SELF_IDENTIFICATION_PATTERNS = [
+                r'\bI\s+am\s+',
+                r'\bI\'m\s+',
+                r'\bMy\s+name\s+is\s+',
+                r'\bThis\s+is\s+',
+            ]
+            if result.entity_type == 'PERSON' and classification in ['KEEP', 'PUBLIC_FIGURE']:
+                preceding_text = text[max(0, result.start - 20): result.start]
+                for pattern in SELF_IDENTIFICATION_PATTERNS:
+                    if re.search(pattern, preceding_text, re.IGNORECASE):
+                        classification = 'EMPLOYEE_PII'
+                        position_based_classifications[position] = 'EMPLOYEE_PII'
+                        logger.warning(
+                            f"OVERRIDE: '{entity_text}' reclassified "
+                            f"from {classification} to EMPLOYEE_PII due to self-identification pattern"
+                        )
+                        break
                 
                 # Store both for backward compatibility
                 if entity_text not in classifications:
@@ -2116,6 +2345,24 @@ class ContextAwarePIIGuard:
                 'JP_PHONE',
                 'BR_CPF', 'PT_PHONE'
             ]
+            MEDICAL_TYPES = [
+            'MEDICAL_RECORD_NUMBER', 'HEALTH_INSURANCE_ID',
+            'PRESCRIPTION_NUMBER',   'DOCTOR_REGISTRATION_NUMBER',
+            'DIAGNOSIS_CODE',        'LAB_REPORT_NUMBER',
+            'DISABILITY_CERTIFICATE','BLOOD_TYPE',
+        ]
+            if result.entity_type in MEDICAL_TYPES:
+                should_redact = True
+                logger.info(
+                    f"[MEDICAL FORCE REDACT] '{entity_text}' "
+                    f"({result.entity_type}) — bypassing LLM classification"
+                )
+                # Override any KEEP or PUBLIC_FIGURE classification
+                if classification in ['KEEP', 'PUBLIC_FIGURE']:
+                    logger.warning(
+                        f"LLM classified '{entity_text}' as {classification} "
+                        f"but MEDICAL_TYPE forces redaction"
+                    )
 
             if result.entity_type in multi_language_types:
                 should_redact = True
@@ -2289,8 +2536,17 @@ class ContextAwarePIIGuard:
                     overlaps = True
                     
                     # Priority list: EMAIL, PHONE, AADHAAR, etc. should not be overridden
-                    priority_types = ['EMAIL_ADDRESS', 'INDIAN_PHONE', 'AADHAAR_NUMBER', 
-                                    'PAN_NUMBER', 'PASSPORT', 'EMPLOYEE_ID', 'IFSC_CODE']
+                    priority_types = [
+                    'EMAIL_ADDRESS',          'INDIAN_PHONE',
+                    'AADHAAR_NUMBER',         'PAN_NUMBER',
+                    'PASSPORT',               'EMPLOYEE_ID',
+                    'IFSC_CODE',
+                    # *** Medical types — highest priority, must not be overridden ***
+                    'MEDICAL_RECORD_NUMBER',  'HEALTH_INSURANCE_ID',
+                    'PRESCRIPTION_NUMBER',    'DOCTOR_REGISTRATION_NUMBER',
+                    'DIAGNOSIS_CODE',         'LAB_REPORT_NUMBER',
+                    'DISABILITY_CERTIFICATE', 'BLOOD_TYPE',
+                ]
                     
                     # If the accepted entity is high priority, skip this one
                     if accepted['type'] in priority_types:
