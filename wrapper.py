@@ -458,60 +458,56 @@ class PublicEntityVerifier:
         return False
     
     # ---- REPLACE entire method ----
-def _check_wikipedia(self, name: str) -> bool:
-    """
-    Check Wikipedia — STRICT: only famous/notable people qualify.
-    Common names like 'Rahul Sharma' may have Wikipedia pages
-    but are NOT public figures.
-    """
-    try:
-        url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            'action': 'query',
-            'format': 'json',
-            'titles': name,
-            'redirects': 1,
-            'prop': 'categories|pageprops',   # *** Get categories to validate notability ***
-        }
-        response = requests.get(url, params=params, timeout=3)
-        data = response.json()
-        pages = data.get('query', {}).get('pages', {})
+    def _check_wikipedia(self, name: str) -> bool:
+      
+        try:
+            url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'format': 'json',
+                'titles': name,
+                'redirects': 1,
+                'prop': 'categories|pageprops',   # *** Get categories to validate notability ***
+            }
+            response = requests.get(url, params=params, timeout=3)
+            data = response.json()
+            pages = data.get('query', {}).get('pages', {})
 
-        for page_id, page_data in pages.items():
-            if page_id == '-1' or 'missing' in page_data:
-                return False
+            for page_id, page_data in pages.items():
+                if page_id == '-1' or 'missing' in page_data:
+                    return False
 
-            # *** NEW: Check if it's actually about a notable person ***
-            categories = [
-                c['title'].lower()
-                for c in page_data.get('categories', [])
-            ]
+                # *** NEW: Check if it's actually about a notable person ***
+                categories = [
+                    c['title'].lower()
+                    for c in page_data.get('categories', [])
+                ]
 
-            # Must have categories indicating genuine public figure
-            NOTABLE_CATEGORIES = [
-                'politicians', 'actors', 'cricketers', 'athletes',
-                'ceos', 'businesspeople', 'scientists', 'musicians',
-                'directors', 'recipients', 'awardees', 'ministers',
-                'prime ministers', 'presidents', 'births'
-            ]
+                # Must have categories indicating genuine public figure
+                NOTABLE_CATEGORIES = [
+                    'politicians', 'actors', 'cricketers', 'athletes',
+                    'ceos', 'businesspeople', 'scientists', 'musicians',
+                    'directors', 'recipients', 'awardees', 'ministers',
+                    'prime ministers', 'presidents', 'births'
+                ]
 
-            is_notable = any(
-                any(cat_kw in cat for cat_kw in NOTABLE_CATEGORIES)
-                for cat in categories
-            )
-
-            if not is_notable:
-                logger.info(
-                    f"Wikipedia page exists for '{name}' but NOT notable "
-                    f"enough to be a public figure — will redact"
+                is_notable = any(
+                    any(cat_kw in cat for cat_kw in NOTABLE_CATEGORIES)
+                    for cat in categories
                 )
-                return False  # *** Don't treat as public figure ***
 
-            return True
+                if not is_notable:
+                    logger.info(
+                        f"Wikipedia page exists for '{name}' but NOT notable "
+                        f"enough to be a public figure — will redact"
+                    )
+                    return False  # *** Don't treat as public figure ***
 
-    except Exception as e:
-        logger.debug(f"Wikipedia check failed for {name}: {e}")
-        return False
+                return True
+
+        except Exception as e:
+            logger.debug(f"Wikipedia check failed for {name}: {e}")
+            return False
     
     def _check_with_llm(self, name: str) -> bool:
         try:
@@ -1640,11 +1636,12 @@ class IndianPIIRecognizers:
     def create_pan_recognizer():
         patterns = [
             Pattern("PAN", r"\b[A-Z]{5}\d{4}[A-Z]\b", 0.95),
+            Pattern("PAN_loose", r"[A-Z]{5}\d{4}[A-Z]", 0.85),  # No word boundary (OCR may attach chars)
         ]
         return PatternRecognizer(
             supported_entity="PAN_NUMBER",
             patterns=patterns,
-            context=["pan", "permanent account"]
+            context=["pan", "permanent account", "pan card", "pan number"]
         )
     
     @staticmethod
@@ -2230,7 +2227,8 @@ class ContextAwarePIIGuard:
         # Detect all PII
         results = self.analyzer.analyze(text=text, language=self.language)
 
-        if self.language == 'en' and not any (r.entity_type == "PERSON" for r in results):
+        if self.language == 'en' and not any(r.entity_type == "PERSON" for r in results):
+            # Try title-case normalization (handles "arun" → "Arun", "ARUN" → "Arun")
             normalized_text = text.title()
             normalized_results = self.analyzer.analyze(text=normalized_text, language=self.language)
             for result in normalized_results:
@@ -2292,23 +2290,30 @@ class ContextAwarePIIGuard:
                 r'\bMy\s+name\s+is\s+',
                 r'\bThis\s+is\s+',
             ]
-            if result.entity_type == 'PERSON' and classification in ['KEEP', 'PUBLIC_FIGURE']:
-                preceding_text = text[max(0, result.start - 20): result.start]
-                for pattern in SELF_IDENTIFICATION_PATTERNS:
-                    if re.search(pattern, preceding_text, re.IGNORECASE):
-                        classification = 'EMPLOYEE_PII'
-                        position_based_classifications[position] = 'EMPLOYEE_PII'
-                        logger.warning(
-                            f"OVERRIDE: '{entity_text}' reclassified "
-                            f"from {classification} to EMPLOYEE_PII due to self-identification pattern"
-                        )
-                        break
-                
-                # Store both for backward compatibility
+            classifications = {}
+            for entity in detected_entities:
+                entity_text = entity['text']
+                position = entity['start']
+                classification = position_based_classifications.get(position, 'KEEP')
+
+                # Self-identification override
+                if entity['type'] == 'PERSON' and classification in ['KEEP', 'PUBLIC_FIGURE']:
+                    preceding_text = text[max(0, entity['start'] - 20): entity['start']]
+                    for pattern in SELF_IDENTIFICATION_PATTERNS:
+                        if re.search(pattern, preceding_text, re.IGNORECASE):
+                            classification = 'EMPLOYEE_PII'
+                            position_based_classifications[position] = 'EMPLOYEE_PII'
+                            logger.warning(
+                                f"OVERRIDE: '{entity_text}' reclassified "
+                                f"from {classification} to EMPLOYEE_PII due to self-identification pattern"
+                            )
+                            break
+
+                # Store for backward compatibility
                 if entity_text not in classifications:
                     classifications[entity_text] = classification
-                
-                # Verify public figures (only if classified as PERSON)
+
+                # Verify public figures
                 if entity['type'] == 'PERSON' and classification not in ['PUBLIC_FIGURE', 'KEEP']:
                     if self.public_verifier.is_public_figure(entity_text):
                         position_based_classifications[position] = 'PUBLIC_FIGURE'
@@ -2369,8 +2374,14 @@ class ContextAwarePIIGuard:
                 logger.info(f"Redacting Muilti language {entity_text} ({result.entity_type}) at position {position}")
 
             elif classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
-                        'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII','PROJECT_CODE', 'EMPLOYEE_ID']:
-                        should_redact = True
+            'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII',
+            'PROJECT_CODE', 'EMPLOYEE_ID']:
+                should_redact = True
+
+            # Force-redact address/location entities regardless of LLM classification
+            elif result.entity_type in ['HOME_ADDRESS', 'LOCATION', 'PIN_CODE']:
+                should_redact = True
+                logger.info(f"[FORCE REDACT] '{entity_text}' ({result.entity_type}) — address/location")
             
             if should_redact:
                 logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
@@ -2382,18 +2393,6 @@ class ContextAwarePIIGuard:
                         'type': result.entity_type,
                         'reason': classification,
                         'position': position
-                    })
-                
-                logger.info(f"REDACTING: {entity_text} at position {position} - {classification}")
-                filtered_results.append(result)
-
-                category = classification if classification in self.redaction_summary else result.entity_type
-                if category in self.redaction_summary:
-                    self.redaction_summary[category].append({
-                        'text': entity_text,
-                        'type': result.entity_type,
-                        'reason': classification,
-                        'position': position  # Track position
                     })
         
         if not filtered_results:
@@ -3000,35 +2999,28 @@ class SpreadsheetHandler:
         return None
     
     def _redact_with_column_context(self, text: str, column_name: str, 
-                                    allowed_entities: list = None,
-                                    enable_semantics: bool = True) -> str:
-        """
-        Redact text with column-aware context.
-        Only redacts entity types that match the column's purpose.
-        """
+                                allowed_entities: list = None,
+                                enable_semantics: bool = True) -> str:
+
         if not enable_semantics or allowed_entities is None:
-            # No restrictions - use default PII detection
             return self.pii_guard.anonymize(text, context_aware=False)
         
-        # Detect all PII
-        results = self.pii_guard.analyzer.analyze(text=text, language=self.pii_guard.language)
+        # For NAME columns: use full anonymize() pipeline which handles
+        # mixed-case normalization AND LLM classification
+        if allowed_entities == ['PERSON']:
+            # Route through full anonymize() — handles ARUN, arun, Arun correctly
+            return self.pii_guard.anonymize(text, context_aware=False)
         
-        # Filter to only allowed entity types for this column
+        # For other column types (PHONE, EMAIL, etc.) use pattern matching only
+        results = self.pii_guard.analyzer.analyze(text=text, language=self.pii_guard.language)
         filtered_results = [r for r in results if r.entity_type in allowed_entities]
         
         if not filtered_results:
-            # No matching PII for this column type
             return text
-        
-        # Build anonymization using only filtered results
+    
         from presidio_anonymizer import AnonymizerEngine
-        
         anonymizer = AnonymizerEngine()
-        anonymized = anonymizer.anonymize(
-            text=text,
-            analyzer_results=filtered_results
-        )
-        
+        anonymized = anonymizer.anonymize(text=text, analyzer_results=filtered_results)
         return anonymized.text
 
 #  PRODUCTION-GRADE IMAGE REDACTOR 
@@ -3056,22 +3048,9 @@ class ProductionImageRedactor:
         # OCR
         try:
             import easyocr
-            self.ocr_reader = easyocr.Reader([
-                'en',      # English
-                'hi',      # Hindi
-                'mr',      # Marathi
-                'es',      # Spanish
-                'fr',      # French
-                'de',      # German
-                'zh_sim',  # Chinese Simplified
-                'zh_tra',  # Chinese Traditional
-                'ja',      # Japanese
-                'ko',      # Korean
-                'pt'       # Portuguese
-            ], gpu=False)
-            logger.info("✓ EasyOCR initialized with multilingual support (11 languages)")
+            self.ocr_reader = easyocr.Reader(['en'], gpu=False)
             self.ocr_available = True
-            logger.info("[OK] EasyOCR initialized successfully")
+            logger.info("✓ EasyOCR initialized (English only)")
         except Exception as e:
             logger.warning(f"EasyOCR not available: {e}")
             self.ocr_available = False
@@ -3124,10 +3103,14 @@ class ProductionImageRedactor:
         
         if self._enable_caching:
             self._ocr_cache[img_hash] = results
-        
+
         return results
     
-    
+    def clear_ocr_cache(self):
+        """Clear the OCR cache"""
+        self._ocr_cache.clear()
+        logger.info("OCR cache cleared")
+
     def redact_image(self, image: Image.Image, 
                      redact_faces=True,
                      redact_ids=True,
@@ -3481,54 +3464,258 @@ class ProductionImageRedactor:
         return summary
 
 # PDF Handler
+# PDF Handler - WITH OCR SUPPORT FOR SCANNED PDFs
 class PDFHandler:
     
     def __init__(self, pii_guard: ContextAwarePIIGuard):
         self.pii_guard = pii_guard
+        self.ocr_reader = None
+        self.ocr_available = False
+        self._init_ocr()
+
+    def _init_ocr(self):
+        try:
+            import easyocr
+            self.ocr_reader = easyocr.Reader(['en'], gpu=False)
+            self.ocr_available = True
+            logger.info("✓ PDFHandler: EasyOCR initialized (English only)")
+        except Exception as e:
+            logger.warning(f"PDFHandler: EasyOCR not available: {e}")
+            self.ocr_available = False
+
+        # HELPER: Check if a page has meaningful selectable text
+
+    def _has_selectable_text(self, page, min_chars: int = 30) -> bool:
     
-    def process_pdf(self, input_path: str, output_path: str = None) -> Dict:
-        """Extract text, anonymize, and create redacted PDF"""
+        text = page.get_text().strip()
+        return len(text) >= min_chars
+
+    # -------------------------------------------------------------------------
+    # HELPER: Render a fitz page to a numpy array (for OCR)
+    # -------------------------------------------------------------------------
+    def _page_to_image(self, page, dpi: int = 200) -> np.ndarray:
+        """
+        Render a PDF page to a numpy BGR image using PyMuPDF.
+        Higher DPI = better OCR accuracy but slower.
+        """
+        zoom = dpi / 72  # 72 is default PDF DPI
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        
+        # Convert pixmap → numpy array (RGB)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8)
+        img_array = img_array.reshape(pix.height, pix.width, 3)
+        
+        # Convert RGB → BGR for OpenCV
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        return img_bgr, zoom  # Return zoom factor for coordinate mapping
+
+    # -------------------------------------------------------------------------
+    # HELPER: Run OCR on a page image, detect PII, return redact rects
+    # -------------------------------------------------------------------------
+    def _ocr_and_detect_pii(self, page_image: np.ndarray, zoom: float) -> List[Dict]:
+        """
+        Run EasyOCR on page image, detect PII in each text block,
+        and return list of redaction rectangles in PDF coordinates.
+        
+        Returns:
+            List of dicts: { 'pdf_rect': fitz.Rect, 'text': str, 'reason': str }
+        """
+        redact_regions = []
+        
+        if not self.ocr_available:
+            return redact_regions
+        
+        try:
+            ocr_results = self.ocr_reader.readtext(page_image)
+
+            # Merge results from additional language readers
+            if hasattr(self, 'ocr_reader_japanese'):
+                ocr_results += self.ocr_reader_japanese.readtext(page_image)
+
+            logger.info(f"OCR found {len(ocr_results)} text blocks on page")
+            
+            for (bbox, text, confidence) in ocr_results:
+                if confidence < 0.3 or not text.strip():
+                    continue
+                
+                # Check if this text contains PII
+                anonymized = self.pii_guard.anonymize(text.strip(), context_aware=True)
+                
+                if text.strip() != anonymized:
+                    # PII detected — convert OCR bbox to PDF coordinates
+                    # bbox is [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] in image pixels
+                    pts = np.array(bbox)
+                    x_min = int(pts[:, 0].min())
+                    y_min = int(pts[:, 1].min())
+                    x_max = int(pts[:, 0].max())
+                    y_max = int(pts[:, 1].max())
+                    
+                    # Scale back from image pixels → PDF points
+                    pdf_x0 = x_min / zoom
+                    pdf_y0 = y_min / zoom
+                    pdf_x1 = x_max / zoom
+                    pdf_y1 = y_max / zoom
+                    
+                    # Add small padding for clean redaction
+                    padding = 2
+                    pdf_rect = fitz.Rect(
+                        pdf_x0 - padding,
+                        pdf_y0 - padding,
+                        pdf_x1 + padding,
+                        pdf_y1 + padding
+                    )
+                    
+                    redact_regions.append({
+                        'pdf_rect': pdf_rect,
+                        'text': text.strip(),
+                        'reason': 'OCR-detected PII'
+                    })
+                    
+                    logger.info(f"OCR PII detected: '{text[:30]}...' → redacting at {pdf_rect}")
+        
+        except Exception as e:
+            logger.error(f"OCR PII detection failed on page: {e}")
+        
+        return redact_regions
+
+    # -------------------------------------------------------------------------
+    # MAIN: process_pdf — handles both text-based AND scanned PDFs
+    # -------------------------------------------------------------------------
+    def process_pdf(self, input_path: str, output_path: str = None,
+                    ocr_dpi: int = 200,
+                    force_ocr: bool = False) -> Dict:
         if not output_path:
             output_path = input_path.replace('.pdf', '_REDACTED.pdf')
         
         doc = fitz.open(input_path)
-        full_text = ""
-        anonymized_text = ""
+        total_pages = len(doc)
         
-        for page in doc:
-            text = page.get_text()
-            full_text += text
-            anonymized = self.pii_guard.anonymize(text)
-            anonymized_text += anonymized
+        stats = {
+            'total_pages': total_pages,
+            'text_based_pages': 0,
+            'ocr_pages': 0,
+            'pii_found': {},
+            'entities_kept': [],
+            'redactions_per_page': {}
+        }
         
-        # Create redacted PDF
-        doc_redact = fitz.open(input_path)
-        for page in doc_redact:
-            text = page.get_text()
-            results = self.pii_guard.analyzer.analyze(text=text, language=self.pii_guard.language)
+        logger.info("="*60)
+        logger.info(f"Processing PDF: {input_path}")
+        logger.info(f"Total pages: {total_pages}")
+        logger.info(f"Force OCR: {force_ocr}")
+        logger.info("="*60)
+        
+        for page_num, page in enumerate(doc):
+            page_redaction_count = 0
+            logger.info(f"\n--- Page {page_num + 1}/{total_pages} ---")
             
-            for result in results:
-                entity_text = text[result.start:result.end]
-                if entity_text not in self.pii_guard.kept_entities:
+            # ================================================================
+            # STRATEGY DECISION: Text-based or OCR?
+            # ================================================================
+            use_ocr = force_ocr or not self._has_selectable_text(page)
+            
+            if use_ocr:
+                logger.info(f"Page {page_num+1}: No selectable text → using OCR")
+                stats['ocr_pages'] += 1
+
+                if not self.ocr_available:
+                    logger.warning(f"Page {page_num+1}: OCR not available — page skipped")
+                    continue
+
+                try:
+                    logger.info("Step 1: Rendering page to image...")
+                    page_image, zoom = self._page_to_image(page, dpi=ocr_dpi)
+                    logger.info(f"Step 1 OK: shape={page_image.shape}, zoom={zoom}")
+                except Exception as e:
+                    import traceback
+                    logger.error(f"CRASH in _page_to_image: {e}")
+                    logger.error(traceback.format_exc())
+                    continue
+
+                try:
+                    logger.info("Step 2: Running OCR + PII detection...")
+                    redact_regions = self._ocr_and_detect_pii(page_image, zoom)
+                    logger.info(f"Step 2 OK: {len(redact_regions)} regions found")
+                except Exception as e:
+                    import traceback
+                    logger.error(f"CRASH in _ocr_and_detect_pii: {e}")
+                    logger.error(traceback.format_exc())
+                    continue
+
+                try:
+                    logger.info("Step 3: Applying redactions...")
+                    for region in redact_regions:
+                        page.add_redact_annot(region['pdf_rect'], fill=(0, 0, 0))
+                        page_redaction_count += 1
+                    if redact_regions:
+                        page.apply_redactions()
+                    logger.info(f"Step 3 OK: {page_redaction_count} redactions applied")
+                except Exception as e:
+                    import traceback
+                    logger.error(f"CRASH in apply_redactions: {e}")
+                    logger.error(traceback.format_exc())
+                    continue
+            
+            else:
+                # ============================================================
+                # PATH B: TEXT-BASED PAGE → STANDARD PIPELINE
+                # ============================================================
+                logger.info(f"Page {page_num+1}: Selectable text found → standard pipeline")
+                stats['text_based_pages'] += 1
+                
+                text = page.get_text()
+                
+                # Single call — anonymize handles analysis + classification
+                self.pii_guard.anonymize(text, context_aware=True)
+                
+                # Use reverse_mapping (populated by anonymize) to know what to redact
+                entities_to_redact = set()
+                for placeholder, mapping_info in self.pii_guard.reverse_mapping.items():
+                    original_value = mapping_info['value'] if isinstance(mapping_info, dict) else mapping_info
+                    entities_to_redact.add(original_value)
+                
+                for entity_text in entities_to_redact:
                     instances = page.search_for(entity_text)
                     for inst in instances:
                         page.add_redact_annot(inst, fill=(0, 0, 0))
+                        page_redaction_count += 1
+                        logger.info(f"  ✓ Redacted: '{entity_text}'")
+                
+                if page_redaction_count > 0:
+                    page.apply_redactions()
+                    logger.info(f"  Applied {page_redaction_count} redactions on page {page_num+1}")
             
-            page.apply_redactions()
+            stats['redactions_per_page'][f'page_{page_num+1}'] = page_redaction_count
+            self.pii_guard.clear()
         
-        doc_redact.save(output_path)
-        doc_redact.close()
+        # Save the redacted PDF
+        doc.save(output_path)
         doc.close()
         
-        logger.info(f"Saved redacted PDF: {output_path}")
+        # Collect final stats
+        stats['pii_found'] = {
+            k: (v['value'] if isinstance(v, dict) else v)
+            for k, v in self.pii_guard.reverse_mapping.items()
+        }
+        stats['entities_kept'] = list(self.pii_guard.kept_entities)
+        stats['total_redactions'] = sum(stats['redactions_per_page'].values())
+        
+        logger.info("="*60)
+        logger.info("PDF PROCESSING COMPLETE")
+        logger.info(f"  Text-based pages : {stats['text_based_pages']}")
+        logger.info(f"  OCR pages        : {stats['ocr_pages']}")
+        logger.info(f"  Total redactions : {stats['total_redactions']}")
+        logger.info(f"  Output saved to  : {output_path}")
+        logger.info("="*60)
         
         return {
             'type': 'pdf',
             'input_file': input_path,
             'output_file': output_path,
-            'pages': len(doc),
-            'pii_found': dict(self.pii_guard.reverse_mapping),
-            'entities_kept': list(self.pii_guard.kept_entities),
+            'stats': stats,
+            'pii_found': stats['pii_found'],
+            'entities_kept': stats['entities_kept'],
             'timestamp': datetime.now().isoformat()
         }
 
@@ -3700,7 +3887,7 @@ class IntelligentPIIPipeline:
         ext = os.path.splitext(file_path)[1].lower()
         
         if ext == '.pdf':
-            return self.pdf_handler.process_pdf(file_path)
+            return self.pdf_handler.process_pdf(file_path , ocr_dpi=200, force_ocr=False)
         elif ext in ['.xlsx', '.xls']:
             return self.spreadsheet_handler.process_excel(file_path)
         elif ext == '.csv':
@@ -3853,11 +4040,17 @@ def main():
         elif choice == '2':
             file_path = input("\nFile path: ").strip()
             if os.path.exists(file_path):
-                result = pipeline.process_file(file_path)
+                # ADD: ask for OCR options if it's a PDF
+                if file_path.lower().endswith('.pdf'):
+                    force_ocr = input("Force OCR on all pages? (y/N): ").strip().lower() == 'y'
+                    dpi_input = input("OCR DPI (200/300, default 200): ").strip()
+                    ocr_dpi = int(dpi_input) if dpi_input.isdigit() else 200
+                    result = pipeline.pdf_handler.process_pdf(
+                        file_path, force_ocr=force_ocr, ocr_dpi=ocr_dpi
+                    )
+                else:
+                    result = pipeline.process_file(file_path)
                 save_results(result)
-                logger.info(f"✓ Processed: {file_path}")
-            else:
-                logger.error("File not found")
         
         elif choice == '3':
             dir_path = input("\nDirectory path: ").strip()
