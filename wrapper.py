@@ -16,7 +16,7 @@ from PIL import Image
 from functools import wraps
 from datetime import datetime
 from dotenv import load_dotenv
-from dataclasses import dataclass
+from dataclasses import dataclass , field
 from typing import Dict, Tuple, Optional, List
 from presidio_anonymizer import AnonymizerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
@@ -93,6 +93,178 @@ class PIIUsageIntent(Enum):
     COMPUTATION_ALLOWED = "COMPUTATION_ALLOWED"
     TRANSFORMATION_ALLOWED = "TRANSFORMATION_ALLOWED"
     REDACTION_REQUIRED = "REDACTION_REQUIRED"
+
+
+# ── Intent Preservation ────────────────────────────────────────────────────────
+
+@dataclass
+class RedactionDirective:
+    keep_categories: List[str] = field(default_factory=list)
+    force_redact_categories: List[str] = field(default_factory=list)
+    safe_columns: List[str] = field(default_factory=list)
+    sensitive_columns: List[str] = field(default_factory=list)
+    skip_face_redaction: bool = False
+    skip_logo_redaction: bool = False
+    reason: str = ""
+    raw_intent: str = ""
+    confidence: float = 1.0
+
+    def should_keep(self, entity_type: str) -> bool:
+        et = entity_type.upper()
+        return any(k.upper() in et or et in k.upper() for k in self.keep_categories)
+
+    def should_force_redact(self, entity_type: str) -> bool:
+        et = entity_type.upper()
+        return any(k.upper() in et or et in k.upper() for k in self.force_redact_categories)
+
+    def is_safe_column(self, column_name: str) -> bool:
+        col = column_name.lower()
+        return any(s.lower() in col or col in s.lower() for s in self.safe_columns)
+
+    def is_sensitive_column(self, column_name: str) -> bool:
+        col = column_name.lower()
+        return any(s.lower() in col or col in s.lower() for s in self.sensitive_columns)
+
+    def to_dict(self) -> Dict:
+        return {
+            "keep_categories": self.keep_categories,
+            "force_redact_categories": self.force_redact_categories,
+            "safe_columns": self.safe_columns,
+            "sensitive_columns": self.sensitive_columns,
+            "skip_face_redaction": self.skip_face_redaction,
+            "skip_logo_redaction": self.skip_logo_redaction,
+            "reason": self.reason,
+            "raw_intent": self.raw_intent,
+            "confidence": self.confidence,
+        }
+
+
+class IntentPreservationEngine:
+
+    ALL_ENTITY_TYPES = [
+        "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "INDIAN_PHONE",
+        "AADHAAR_NUMBER", "PAN_NUMBER", "PASSPORT", "EMPLOYEE_ID",
+        "BANK_ACCOUNT", "IFSC_CODE", "SALARY_INFO", "HOME_ADDRESS",
+        "PIN_CODE", "PROJECT_CODE", "CLIENT_INFO",
+        "MEDICAL_RECORD_NUMBER", "HEALTH_INSURANCE_ID",
+        "PRESCRIPTION_NUMBER", "DOCTOR_REGISTRATION_NUMBER",
+        "DIAGNOSIS_CODE", "LAB_REPORT_NUMBER",
+        "DISABILITY_CERTIFICATE", "BLOOD_TYPE",
+        "LOCATION", "DATE_TIME", "NRP",
+        "ES_DNI", "ES_NIE", "ES_PHONE",
+        "FR_NIR", "FR_PHONE",
+        "DE_TAX_ID", "DE_PHONE",
+        "CN_ID", "CN_PHONE", "CN_PERSON",
+        "JP_PHONE", "JP_PERSON",
+        "KR_PERSON",
+        "BR_CPF", "PT_PHONE",
+    ]
+
+    def __init__(self, groq_client):
+        self.groq_client = groq_client
+        self._cache: Dict[str, RedactionDirective] = {}
+
+    def analyze(self, user_intent: str,
+                file_type: str = "unknown",
+                detected_columns: Optional[List[str]] = None) -> RedactionDirective:
+        cache_key = f"{user_intent.strip().lower()}|{file_type}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        directive = self._call_llm(user_intent, file_type, detected_columns)
+        directive.raw_intent = user_intent
+        self._cache[cache_key] = directive
+
+        logger.info(f"[IntentPreservation] Keep: {directive.keep_categories}")
+        logger.info(f"[IntentPreservation] Force redact: {directive.force_redact_categories[:5]}")
+        logger.info(f"[IntentPreservation] Safe columns: {directive.safe_columns}")
+        logger.info(f"[IntentPreservation] Reason: {directive.reason}")
+        return directive
+
+    def _call_llm(self, intent: str,
+                  file_type: str,
+                  columns: Optional[List[str]]) -> RedactionDirective:
+
+        col_section = f"\nDetected columns in file: {', '.join(columns)}" if columns else ""
+
+        prompt = f"""You are a CORPORATE DATA GOVERNANCE EXPERT.
+
+A user wants to process a {file_type.upper()} file with this intent:
+\"\"\"{intent}\"\"\"
+{col_section}
+
+Decide which PII categories to KEEP (needed for the purpose) and which to FORCE REDACT.
+
+Available entity types: {', '.join(self.ALL_ENTITY_TYPES)}
+
+RULES:
+- External sharing → redact almost everything personal
+- Internal HR review → keep employee IDs, redact personal contacts
+- Financial audit → keep salary/financial data, redact biometric/medical
+- "only [X]" in intent → everything except X should be redacted
+- "hide/mask [X]" → X goes into force_redact
+- Default: redact everything sensitive
+
+For Excel, also set:
+- safe_columns: columns NOT to redact (partial name match)
+- sensitive_columns: columns to FORCE redact
+
+Respond ONLY with valid JSON:
+{{
+  "keep_categories": ["SALARY_INFO"],
+  "force_redact_categories": ["PERSON", "EMAIL_ADDRESS"],
+  "safe_columns": ["department", "grade"],
+  "sensitive_columns": ["aadhaar", "pan"],
+  "skip_face_redaction": false,
+  "skip_logo_redaction": false,
+  "reason": "Sharing with auditor - personal identifiers not needed",
+  "confidence": 0.92
+}}"""
+
+        try:
+            response = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=600,
+            )
+            raw = response.choices[0].message.content.strip()
+            json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                return RedactionDirective(
+                    keep_categories=data.get("keep_categories", []),
+                    force_redact_categories=data.get("force_redact_categories", []),
+                    safe_columns=data.get("safe_columns", []),
+                    sensitive_columns=data.get("sensitive_columns", []),
+                    skip_face_redaction=data.get("skip_face_redaction", False),
+                    skip_logo_redaction=data.get("skip_logo_redaction", False),
+                    reason=data.get("reason", ""),
+                    confidence=float(data.get("confidence", 0.9)),
+                )
+        except Exception as e:
+            logger.warning(f"IntentPreservationEngine LLM call failed: {e}")
+
+        return RedactionDirective(
+            force_redact_categories=self.ALL_ENTITY_TYPES,
+            reason="Fallback: LLM unavailable — redacting all PII",
+            confidence=0.5,
+        )
+
+
+class DirectiveAwareFilter:
+    def __init__(self, directive: Optional[RedactionDirective]):
+        self.directive = directive
+
+    def should_redact(self, entity_type: str, classification: str) -> bool:
+        if self.directive is None:
+            return True
+        if self.directive.should_force_redact(entity_type):
+            return True
+        if self.directive.should_keep(entity_type):
+            return False
+        return True
+
 
 class RedactionPolicy:
     """Enterprise-grade image redaction policy"""
@@ -813,18 +985,6 @@ class MultilingualPIIRecognizers:
         )
 
 # ========== CHINESE NAMES ==========
-    @staticmethod
-    def create_chinese_name_recognizer():
-        """Chinese names (Simplified/Traditional)"""
-        patterns = [
-            # Chinese name patterns (2-4 characters)
-            Pattern("CN Name", r"[\u4e00-\u9fff]{2,4}", 0.80),
-        ]
-        return PatternRecognizer(
-            supported_entity="CN_PERSON",
-            patterns=patterns,
-            context=["先生", "女士", "小姐", "名字", "姓名", "name"]
-        )
     @staticmethod
     def create_chinese_name_recognizer():
         """Chinese names (Simplified/Traditional)"""
@@ -2023,6 +2183,10 @@ class ContextAwarePIIGuard:
         # Context understanding
         self.context_classifier = ContextAwareClassifier(groq_client)
         self.public_verifier = PublicEntityVerifier(groq_client)
+
+        # Intent preservation engine
+        self.intent_engine = IntentPreservationEngine(groq_client)
+        self.active_directive = None
         
         self.mapping = {}
         self.reverse_mapping = {}
@@ -2362,23 +2526,34 @@ class ContextAwarePIIGuard:
                     f"[MEDICAL FORCE REDACT] '{entity_text}' "
                     f"({result.entity_type}) — bypassing LLM classification"
                 )
-                # Override any KEEP or PUBLIC_FIGURE classification
                 if classification in ['KEEP', 'PUBLIC_FIGURE']:
                     logger.warning(
                         f"LLM classified '{entity_text}' as {classification} "
                         f"but MEDICAL_TYPE forces redaction"
                     )
 
-            if result.entity_type in multi_language_types:
+            # ── INTENT DIRECTIVE: force-redact overrides everything ────────
+            elif self.active_directive and self.active_directive.should_force_redact(
+                    result.entity_type):
                 should_redact = True
-                logger.info(f"Redacting Muilti language {entity_text} ({result.entity_type}) at position {position}")
+                logger.info(f"[Directive FORCE REDACT] '{entity_text}' ({result.entity_type})")
 
-            elif classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII', 
+            # ── INTENT DIRECTIVE: keep overrides default redaction ─────────
+            elif self.active_directive and self.active_directive.should_keep(
+                    result.entity_type):
+                should_redact = False
+                self.kept_entities.add(entity_text)
+                logger.info(f"[Directive KEEP] '{entity_text}' ({result.entity_type}) per user intent")
+
+            elif result.entity_type in multi_language_types:
+                should_redact = True
+                logger.info(f"Redacting Multi language {entity_text} ({result.entity_type}) at position {position}")
+
+            elif classification in ['USER_PII', 'THIRD_PARTY_PII', 'EMPLOYEE_PII',
             'CLIENT_SENSITIVE', 'FINANCIAL_DATA', 'COLLEAGUE_PII',
             'PROJECT_CODE', 'EMPLOYEE_ID']:
                 should_redact = True
 
-            # Force-redact address/location entities regardless of LLM classification
             elif result.entity_type in ['HOME_ADDRESS', 'LOCATION', 'PIN_CODE']:
                 should_redact = True
                 logger.info(f"[FORCE REDACT] '{entity_text}' ({result.entity_type}) — address/location")
@@ -2785,17 +2960,11 @@ class SpreadsheetHandler:
     def process_excel(self, file_path: str, output_path: str = None, 
                   columns_to_redact: list = None,
                   exclude_columns: list = None,
-                  enable_column_semantics: bool = True) -> dict:
-        """
-        Process Excel file with column-aware business semantics.
+                  enable_column_semantics: bool = True,
+                  directive=None,
+                  user_intent: str = "") -> dict:
         
-        Args:
-            file_path: Input Excel file
-            output_path: Output file path
-            columns_to_redact: Specific columns to redact (if None, auto-detect)
-            exclude_columns: Columns to NEVER redact (e.g., ['INCOME', 'SAL'])
-            enable_column_semantics: Use business logic to understand column types
-        """
+        
         import logging
         logger = logging.getLogger(__name__)
         
@@ -2809,6 +2978,24 @@ class SpreadsheetHandler:
         if exclude_columns:
             exclude_columns_normalized = [col.strip().upper() for col in exclude_columns]
             logger.info(f"📌 EXCLUDED COLUMNS (will NOT redact): {exclude_columns_normalized}")
+        
+        # ── Intent preservation: merge directive safe/sensitive columns ────
+        if directive:
+            for col in directive.safe_columns:
+                cn = col.strip().upper()
+                if cn not in exclude_columns_normalized:
+                    exclude_columns_normalized.append(cn)
+                    logger.info(f"[Directive] Column '{col}' SAFE by intent → excluded")
+            
+            if columns_to_redact is None:
+                columns_to_redact = []
+            for col in directive.sensitive_columns:
+                if col not in columns_to_redact:
+                    columns_to_redact.append(col)
+                    logger.info(f"[Directive] Column '{col}' SENSITIVE by intent → added")
+            
+            self.pii_guard.active_directive = directive
+            logger.info(f"[Directive] Reason: {directive.reason}")
         
         # Read Excel
         import openpyxl
@@ -3117,9 +3304,20 @@ class ProductionImageRedactor:
                      redact_screens=True,
                      redact_text=True,
                      redact_logos=True,
-                     redact_documents=True) -> Tuple[Image.Image, Dict]:  
+                     redact_documents=True,
+                     directive=None) -> Tuple[Image.Image, Dict]: 
         """Redact image based on policy and specified options"""
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        if directive:
+            if directive.skip_face_redaction:
+                redact_faces = False
+                logger.info("[Directive] Face redaction DISABLED by intent")
+            if directive.skip_logo_redaction:
+                redact_logos = False
+                logger.info("[Directive] Logo redaction DISABLED by intent")
+            if self.pii_guard:
+                self.pii_guard.active_directive = directive
 
         # Image quality validation
         quality_check = self._validate_image_quality(img_cv)
@@ -3584,11 +3782,18 @@ class PDFHandler:
     # -------------------------------------------------------------------------
     def process_pdf(self, input_path: str, output_path: str = None,
                     ocr_dpi: int = 200,
-                    force_ocr: bool = False) -> Dict:
+                    force_ocr: bool = False,
+                    directive=None,
+                    user_intent: str = "") -> Dict:
         if not output_path:
             output_path = input_path.replace('.pdf', '_REDACTED.pdf')
         
         doc = fitz.open(input_path)
+
+        if directive:
+            self.pii_guard.active_directive = directive
+            logger.info(f"[Directive] PDF processing intent: {directive.reason}")
+
         total_pages = len(doc)
         
         stats = {
@@ -3882,18 +4087,50 @@ class IntelligentPIIPipeline:
         finally:
             self.pii_guard.clear()
     
-    def process_file(self, file_path: str) -> Dict:
+    def process_file(self, file_path: str, user_intent: str = "") -> Dict:
         """Process any supported file type"""
         ext = os.path.splitext(file_path)[1].lower()
-        
+
+        # ── Resolve intent → directive ─────────────────────────────────────
+        directive = None
+        if user_intent.strip():
+            cols = []
+            if ext in ['.xlsx', '.xls']:
+                try:
+                    wb = openpyxl.load_workbook(file_path, read_only=True)
+                    ws = wb.active
+                    cols = [str(c.value) for c in next(ws.iter_rows(max_row=1))
+                            if c.value]
+                    wb.close()
+                except Exception:
+                    pass
+
+            directive = self.pii_guard.intent_engine.analyze(
+                user_intent=user_intent,
+                file_type=ext.lstrip('.') or 'unknown',
+                detected_columns=cols or None,
+            )
+            logger.info(f"[IntentPreservation] Keep: {directive.keep_categories}")
+            logger.info(f"[IntentPreservation] Redact: {directive.force_redact_categories[:5]}...")
+            logger.info(f"[IntentPreservation] Reason: {directive.reason}")
+        # ──────────────────────────────────────────────────────────────────
+
         if ext == '.pdf':
-            return self.pdf_handler.process_pdf(file_path , ocr_dpi=200, force_ocr=False)
+            return self.pdf_handler.process_pdf(
+                file_path, ocr_dpi=200, force_ocr=False,
+                directive=directive, user_intent=user_intent)
+
         elif ext in ['.xlsx', '.xls']:
-            return self.spreadsheet_handler.process_excel(file_path)
+            return self.spreadsheet_handler.process_excel(
+                file_path,
+                directive=directive, user_intent=user_intent)
+
         elif ext == '.csv':
             return self.spreadsheet_handler.process_csv(file_path)
+
         elif ext in ['.jpg', '.jpeg', '.png', '.bmp']:
             return self.process_image(file_path)
+
         else:
             return {'error': f'Unsupported file type: {ext}'}
     
@@ -4040,16 +4277,50 @@ def main():
         elif choice == '2':
             file_path = input("\nFile path: ").strip()
             if os.path.exists(file_path):
-                # ADD: ask for OCR options if it's a PDF
+
+                # ── Ask user for their intent ──────────────────────────────
+                print("\n Describe why you're processing this file.")
+                print("   (Press Enter to skip — uses default redaction rules)")
+                print("   Examples:")
+                print("   • 'Share with external auditors, they need salary data only'")
+                print("   • 'Internal HR review, keep employee IDs, hide contacts'")
+                print("   • 'Publish as anonymised dataset, remove all personal info'")
+                print("   • 'Send to compliance team, mask only Aadhaar and PAN'")
+                user_intent = input("\nYour intent: ").strip()
+
                 if file_path.lower().endswith('.pdf'):
                     force_ocr = input("Force OCR on all pages? (y/N): ").strip().lower() == 'y'
                     dpi_input = input("OCR DPI (200/300, default 200): ").strip()
                     ocr_dpi = int(dpi_input) if dpi_input.isdigit() else 200
+
+                    directive = None
+                    if user_intent:
+                        directive = pipeline.pii_guard.intent_engine.analyze(
+                            user_intent=user_intent, file_type="pdf"
+                        )
+
                     result = pipeline.pdf_handler.process_pdf(
-                        file_path, force_ocr=force_ocr, ocr_dpi=ocr_dpi
+                        file_path, force_ocr=force_ocr, ocr_dpi=ocr_dpi,
+                        directive=directive, user_intent=user_intent,
                     )
                 else:
-                    result = pipeline.process_file(file_path)
+                    result = pipeline.process_file(
+                        file_path, user_intent=user_intent
+                    )
+
+                # ── Print directive summary in terminal ────────────────────
+                d = getattr(pipeline.pii_guard, 'active_directive', None)
+                if d:
+                    print("\n  INTENT DIRECTIVE APPLIED:")
+                    print(f"   Intent  : {user_intent}")
+                    print(f"   Reason  : {d.reason}")
+                    print(f"   Kept    : {d.keep_categories}")
+                    print(f"   Redacted: {d.force_redact_categories[:5]}...")
+                    if d.safe_columns:
+                        print(f"   Safe cols      : {d.safe_columns}")
+                    if d.sensitive_columns:
+                        print(f"   Sensitive cols : {d.sensitive_columns}")
+
                 save_results(result)
         
         elif choice == '3':
