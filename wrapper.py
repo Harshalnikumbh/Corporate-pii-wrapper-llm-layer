@@ -2306,11 +2306,11 @@ class ContextAwarePIIGuard:
         }
     
     def detect_and_switch_language(self, text: str) -> str:
-        """
-        Detect language and switch analyzer if needed
-        Returns: detected language code
-        """
+       
         if not self.auto_detect:
+            return self.current_language
+        
+        if len(text.strip()) < 20:
             return self.current_language
         
         detected_lang = self.language_detector.detect_language(text)
@@ -2971,14 +2971,24 @@ class SpreadsheetHandler:
         logger.info(f"Processing Excel file: {file_path}")
         
         if not output_path:
-            output_path = file_path.replace('.xlsx', '_REDACTED.xlsx').replace('.xls', '_REDACTED.xls')
+            if '_REDACTED' not in file_path:
+                output_path = file_path.replace('.xlsx', '_REDACTED.xlsx').replace('.xls', '_REDACTED.xls')
+            else:
+                output_path = file_path
         
         # Normalize exclude list
         exclude_columns_normalized = []
         if exclude_columns:
             exclude_columns_normalized = [col.strip().upper() for col in exclude_columns]
             logger.info(f"📌 EXCLUDED COLUMNS (will NOT redact): {exclude_columns_normalized}")
-        
+    
+        # ── Intent classification (ALWAYS runs if user_intent provided) ───
+        excel_intent_decision = {"intent": "REDACTION_REQUIRED", "reason": "default"}
+        if user_intent.strip():
+            excel_intent_decision = self.pii_guard.classify_pii_intent(user_intent)
+            logger.info(f"[Excel Intent] Classification: {excel_intent_decision['intent']}")
+            logger.info(f"[Excel Intent] Reason       : {excel_intent_decision['reason']}")
+
         # ── Intent preservation: merge directive safe/sensitive columns ────
         if directive:
             for col in directive.safe_columns:
@@ -2996,6 +3006,59 @@ class SpreadsheetHandler:
             
             self.pii_guard.active_directive = directive
             logger.info(f"[Directive] Reason: {directive.reason}")
+
+        # ── FIX 1: Computation/Transformation check (now ALWAYS reached) ──
+        if excel_intent_decision["intent"] in [
+            PIIUsageIntent.COMPUTATION_ALLOWED.value,
+            PIIUsageIntent.TRANSFORMATION_ALLOWED.value,
+        ]:
+            logger.info(
+                f"[Excel Intent] SKIPPING redaction — intent is "
+                f"{excel_intent_decision['intent']}: {excel_intent_decision['reason']}"
+            )
+            print(f"\n  ⚡ INTENT : {excel_intent_decision['intent']}")
+            print(f"  📋 REASON : {excel_intent_decision['reason']}")
+            print(f"  ✅ No redaction applied — data passed through as-is.\n")
+
+            # ── FIX 2: LLM response (was silently failing before) ─────────
+            llm_prompt = (
+                f"The user is processing an Excel file with this intent:\n"
+                f"\"{user_intent}\"\n\n"
+                f"System classified this as: {excel_intent_decision['intent']}\n"
+                f"Reason: {excel_intent_decision['reason']}\n\n"
+                f"The file was NOT redacted because the data is needed as-is.\n"
+                f"In 2-3 sentences, confirm this decision and briefly describe "
+                f"what the user can now do with the unredacted data."
+            )
+            try:
+                llm_response = self.pii_guard.context_classifier.groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a data governance assistant. Be concise and professional."
+                        },
+                        {"role": "user", "content": llm_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=300,
+                )
+                llm_output = llm_response.choices[0].message.content.strip()
+                logger.info(f"[Excel LLM Response] {llm_output}")
+                print(f"\n  🤖 LLM RESPONSE:\n  {llm_output}\n")
+            except Exception as e:
+                logger.warning(f"LLM response failed: {e}")
+                print(f"  ⚠ LLM unavailable: {e}")
+
+            return {
+                'type': 'excel',
+                'input_file': file_path,
+                'output_file': file_path,
+                'intent_classification': excel_intent_decision,
+                'redaction_applied': False,
+                'reason': excel_intent_decision['reason'],
+                'timestamp': datetime.now().isoformat()
+            }
         
         # Read Excel
         import openpyxl
@@ -3149,6 +3212,8 @@ class SpreadsheetHandler:
             'input_file': file_path,
             'output_file': output_path,
             'stats': stats,
+            'intent_classification': excel_intent_decision,   
+            'redaction_applied': True,                        
             'timestamp': datetime.now().isoformat()
         }
     
@@ -4085,10 +4150,59 @@ class IntelligentPIIPipeline:
             
         finally:
             self.pii_guard.clear()
+
+    def _try_answer_query(self, file_path: str, user_intent: str) -> Optional[str]:
+        
+        # Quick heuristic — does it look like a question?
+        question_signals = ['what is', 'what are', 'find', 'show', 'get',
+                            'who is', 'tell me', 'give me', '?']
+        intent_lower = user_intent.lower()
+        if not any(sig in intent_lower for sig in question_signals):
+            return None
+
+        try:
+            # Read the Excel into a string table (first 20 rows)
+            wb = openpyxl.load_workbook(file_path, read_only=True)
+            ws = wb.active
+            rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i > 20:  # cap rows to avoid token overflow
+                    break
+                rows.append('\t'.join(str(v) if v is not None else '' for v in row))
+            wb.close()
+            table_text = '\n'.join(rows)
+
+            prompt = (
+                f"Here is data from an Excel file:\n\n"
+                f"{table_text}\n\n"
+                f"Answer this question using only the data above:\n"
+                f"\"{user_intent}\"\n\n"
+                f"Be concise. If the answer is not in the data, say so."
+            )
+
+            response = self.llm_client.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a data analyst. Answer only from the provided data."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=300,
+            )
+            return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            logger.warning(f"Query answering failed: {e}")
+            return None
     
     def process_file(self, file_path: str, user_intent: str = "") -> Dict:
         """Process any supported file type"""
         ext = os.path.splitext(file_path)[1].lower()
+
+        if user_intent.strip() and ext in ['.xlsx', '.xls']:
+            answer = self._try_answer_query(file_path, user_intent)
+            if answer:
+                print(f"\n  📋 QUERY ANSWER:\n  {answer}\n")
 
         # ── Resolve intent → directive ─────────────────────────────────────
         directive = None
