@@ -3661,7 +3661,6 @@ class ProductionImageRedactor:
         
         return summary
 
-# PDF Handler
 # PDF Handler - WITH OCR SUPPORT FOR SCANNED PDFs
 class PDFHandler:
     
