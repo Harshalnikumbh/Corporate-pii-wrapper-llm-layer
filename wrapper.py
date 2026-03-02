@@ -2521,7 +2521,7 @@ class ContextAwarePIIGuard:
             'DISABILITY_CERTIFICATE','BLOOD_TYPE',
         ]
             if result.entity_type in MEDICAL_TYPES:
-                should_redact = True
+                should_redact =  True
                 logger.info(
                     f"[MEDICAL FORCE REDACT] '{entity_text}' "
                     f"({result.entity_type}) — bypassing LLM classification"
@@ -3194,12 +3194,12 @@ class SpreadsheetHandler:
         
         # Save redacted workbook
         workbook.save(output_path)
-        logger.info(f"✅ Saved redacted Excel: {output_path}")
+        logger.info(f"Saved redacted Excel: {output_path}")
         
         # Get all detected PII entities
         stats['pii_found'] = dict(self.pii_guard.reverse_mapping)
         
-        logger.info(f"📊 SUMMARY:")
+        logger.info(f"     SUMMARY:")
         logger.info(f"   - Redacted: {stats['cells_redacted']} cells")
         logger.info(f"   - Skipped (safe): {stats['cells_skipped_safe']} cells")
         logger.info(f"   - Sheets: {stats['sheets_processed']}")
@@ -3218,10 +3218,7 @@ class SpreadsheetHandler:
         }
     
     def _classify_column_type(self, column_name: str) -> str:
-        """
-        Classify column type based on business semantics.
-        Returns: SAFE_NUMERIC | PII_PERSONAL | PII_CONTACT | PII_IDENTITY | PII_LOCATION | UNKNOWN
-        """
+        
         col_lower = column_name.lower().strip()
         
         # Check each category
@@ -3232,10 +3229,7 @@ class SpreadsheetHandler:
         return 'UNKNOWN'
     
     def _get_allowed_entities_for_column(self, column_name: str) -> list:
-        """
-        Get allowed PII entity types for a specific column.
-        Returns: List of entity types that should be detected, or None for all
-        """
+        
         col_lower = column_name.lower().strip()
         
         # Check if column matches known patterns
@@ -4460,7 +4454,7 @@ def main():
 
         # After line ~1618 in main()
         elif choice == '5':  # Add new option
-            print("\n📊 TEST: Excel Column-Aware Redaction")
+            print("\n  TEST: Excel Column-Aware Redaction")
             file_path = input("Excel file path: ").strip()
             
             if os.path.exists(file_path):
@@ -4471,8 +4465,8 @@ def main():
                     enable_column_semantics=True
                 )
                 
-                print("\n✅ REDACTION COMPLETE")
-                print(f"📊 Stats:")
+                print("\n   REDACTION COMPLETE")
+                print(f"    Stats:")
                 print(f"   - Cells redacted: {result['stats']['cells_redacted']}")
                 print(f"   - Cells skipped (safe): {result['stats']['cells_skipped_safe']}")
                 print(f"   - Excluded columns: {result['stats']['columns_excluded']}")
