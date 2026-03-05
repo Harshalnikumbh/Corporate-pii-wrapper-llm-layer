@@ -940,7 +940,7 @@ class MultilingualPIIRecognizers:
     
     @staticmethod
     def create_portuguese_phone_recognizer():
-        """Portuguese/Brazilian phone numbers - STRICT patterns to avoid false positives"""
+        # Portuguese/Brazilian phone numbers - STRICT patterns to avoid false positives
         patterns = [
             # Brazil with country code: +55 11 98765-4321
             Pattern("PT/BR Phone", r"\+55\s?\d{2}\s?\d{4,5}-\d{4}\b", 0.95),
@@ -1039,10 +1039,7 @@ class IDDocumentDetector:
 
     @retry_on_failure(max_retries=2, delay=1)
     def detect_id_documents(self, image_cv, ocr_reader=None) -> List[Dict]:
-        """
-        Detect ID documents and return INDIVIDUAL PII FIELDS to redact,
-        including QR codes and signatures.
-        """
+       
         detected_docs = []
         
         if ocr_reader is None:
@@ -1152,8 +1149,7 @@ class IDDocumentDetector:
                 processed_indices.add(idx)
                 logger.info(f"✓ DOB detected (with label): {text_clean}")
                 continue
-            
-            # ========== PRIORITY 3: CHECK IF IT'S A GOVERNMENT LABEL ==========
+           
             # Skip if text is a known government label or contains label keywords
             gender_keywords = ['male', 'female', 'पुरुष', 'स्त्री', 'पुरुप']
             if any(kw in text_lower for kw in gender_keywords):
@@ -1183,8 +1179,7 @@ class IDDocumentDetector:
             if is_government_label:
                 logger.debug(f"SKIPPING government label: {text_clean}")
                 continue
-            
-            # ========== PRIORITY 4: MARATHI/HINDI NAMES ==========
+        
             if has_devanagari:
                 # It has Devanagari and it's NOT a government label
                 # Check it's not just a single character
@@ -1197,8 +1192,7 @@ class IDDocumentDetector:
                     processed_indices.add(idx)
                     logger.info(f"✓ DETECTED MARATHI/HINDI NAME: {text_clean}")
                     continue
-            
-            # ========== PRIORITY 5: ENGLISH NAMES ==========
+    
             # Capitalized words like "Jay", "Nilesh Pople"
             if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', text_clean):
                 SKIP_WORDS = {'Male', 'Female', 'Government', 'India', 'Aadhaar', 
@@ -1231,7 +1225,7 @@ class IDDocumentDetector:
         return pii_fields
     
     def _bbox_to_rect(self, bbox) -> Tuple[int, int, int, int]:
-        """Convert OCR bbox to (x, y, width, height)"""
+       
         points = np.array(bbox)
         x_min, y_min = points.min(axis=0).astype(int)
         x_max, y_max = points.max(axis=0).astype(int)
@@ -1245,7 +1239,7 @@ class IDDocumentDetector:
         )
     # QR code detection within ID documents
     def _detect_qr_code(self, image_cv) -> List[Dict]:
-        """Detect QR codes using contour-based method (WORKING VERSION)"""
+      
         qr_fields = []
         
         try:
@@ -1367,10 +1361,8 @@ class IDDocumentDetector:
         logger.warning("ML detection failed, using fallback location")
         # h, w = image_cv.shape[:2]
         return []
-        
             
     def _find_document_region(self, image_cv, ocr_results, keywords) -> Optional[Tuple]:
-        """Find bounding box containing ID document keywords"""
         
         pass
 
@@ -1384,7 +1376,7 @@ class MLSignatureDetector:
         self._initialize_local_model() 
     
     def _initialize_local_model(self):
-        """Load local YOLOv8 model from root folder"""
+        
         try:
             from ultralytics import YOLO
             
@@ -1421,10 +1413,7 @@ class MLSignatureDetector:
             self.model_loaded = False
     
     def detect_signatures(self, image_cv) -> List[Dict]:
-        """
-        Detect signatures using pre-trained YOLO model.
-        Falls back to advanced CV if model not available.
-        """
+        
         if self.model_loaded and self.model is not None:
             return self._detect_with_pretrained_yolo(image_cv)
         else:
@@ -1560,10 +1549,7 @@ class MLSignatureDetector:
         return signatures
     
     def _detect_with_advanced_cv(self, image_cv) -> List[Dict]:
-        """
-        Fallback: Advanced computer vision for signature detection.
-        Uses texture analysis and stroke detection.
-        """
+        
         signatures = []
         gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
@@ -3016,9 +3002,9 @@ class SpreadsheetHandler:
                 f"[Excel Intent] SKIPPING redaction — intent is "
                 f"{excel_intent_decision['intent']}: {excel_intent_decision['reason']}"
             )
-            print(f"\n  ⚡ INTENT : {excel_intent_decision['intent']}")
-            print(f"  📋 REASON : {excel_intent_decision['reason']}")
-            print(f"  ✅ No redaction applied — data passed through as-is.\n")
+            print(f"\n INTENT : {excel_intent_decision['intent']}")
+            print(f"   REASON : {excel_intent_decision['reason']}")
+            print(f"   No redaction applied — data passed through as-is.\n")
 
             # ── FIX 2: LLM response (was silently failing before) ─────────
             llm_prompt = (
@@ -3048,7 +3034,7 @@ class SpreadsheetHandler:
                 print(f"\n  🤖 LLM RESPONSE:\n  {llm_output}\n")
             except Exception as e:
                 logger.warning(f"LLM response failed: {e}")
-                print(f"  ⚠ LLM unavailable: {e}")
+                print(f" LLM unavailable: {e}")
 
             return {
                 'type': 'excel',
@@ -3113,7 +3099,7 @@ class SpreadsheetHandler:
                     }
                     
                     if is_excluded:
-                        logger.info(f"🚫 Column '{col_name}' is EXCLUDED - will skip redaction")
+                        logger.info(f"Column '{col_name}' is EXCLUDED - will skip redaction")
             
             # Determine which columns to process
             if columns_to_redact:
@@ -3133,7 +3119,7 @@ class SpreadsheetHandler:
                     if not meta['is_excluded']:
                         # Only process columns that are likely PII
                         if enable_column_semantics and meta['type'] == 'SAFE_NUMERIC':
-                            logger.info(f"⏭️  Skipping '{meta['name']}' - detected as safe numeric column")
+                            logger.info(f" Skipping '{meta['name']}' - detected as safe numeric column")
                             continue
                         column_indices_to_redact.append(col_idx)
                 
@@ -3166,7 +3152,7 @@ class SpreadsheetHandler:
                         
                         # CRITICAL: Skip safe numeric columns
                         if col_type == 'SAFE_NUMERIC':
-                            logger.debug(f"⏭️  Skipping safe numeric value in '{column_name}': {original}")
+                            logger.debug(f" Skipping safe numeric value in '{column_name}': {original}")
                             stats['cells_skipped_safe'] += 1
                             continue
                         
@@ -3303,7 +3289,7 @@ class ProductionImageRedactor:
 
     # Validate image quality
     def _validate_image_quality(self, img_cv) -> Dict:
-        """Check if image quality is sufficient for reda ction"""
+        """Check if image quality is sufficient for redaction"""
         h, w = img_cv.shape[:2]
         
         validation = {
@@ -3750,10 +3736,7 @@ class PDFHandler:
     # HELPER: Render a fitz page to a numpy array (for OCR)
     # -------------------------------------------------------------------------
     def _page_to_image(self, page, dpi: int = 200) -> np.ndarray:
-        """
-        Render a PDF page to a numpy BGR image using PyMuPDF.
-        Higher DPI = better OCR accuracy but slower.
-        """
+        
         zoom = dpi / 72  # 72 is default PDF DPI
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -3770,13 +3753,7 @@ class PDFHandler:
     # HELPER: Run OCR on a page image, detect PII, return redact rects
     # -------------------------------------------------------------------------
     def _ocr_and_detect_pii(self, page_image: np.ndarray, zoom: float) -> List[Dict]:
-        """
-        Run EasyOCR on page image, detect PII in each text block,
-        and return list of redaction rectangles in PDF coordinates.
         
-        Returns:
-            List of dicts: { 'pdf_rect': fitz.Rect, 'text': str, 'reason': str }
-        """
         redact_regions = []
         
         if not self.ocr_available:
@@ -4196,7 +4173,7 @@ class IntelligentPIIPipeline:
         if user_intent.strip() and ext in ['.xlsx', '.xls']:
             answer = self._try_answer_query(file_path, user_intent)
             if answer:
-                print(f"\n  📋 QUERY ANSWER:\n  {answer}\n")
+                print(f"\n   QUERY ANSWER:\n  {answer}\n")
 
         # ── Resolve intent → directive ─────────────────────────────────────
         directive = None
