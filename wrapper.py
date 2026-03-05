@@ -2222,9 +2222,7 @@ class ContextAwarePIIGuard:
         logger.info(f"✓ Auto-detect language: {auto_detect_language}")
     
     def classify_pii_intent(self, text: str) -> Dict:
-        """
-        Decide whether PII in the prompt is REQUIRED to fulfill the user's request.
-        """
+        
         prompt = f"""
             You are a DATA GOVERNANCE AI.
 
@@ -2255,9 +2253,7 @@ class ContextAwarePIIGuard:
             - Identity documents
             - Default for uncertain cases
 
-
-
-            🔥 CRITICAL RULES:
+              CRITICAL RULES:
             - If the query is ABOUT a name/word itself (not a person) → TRANSFORMATION_ALLOWED
             - If removing the data breaks the task logic → COMPUTATION_ALLOWED
             - If the data is just mentioned casually → REDACTION_REQUIRED
@@ -3257,7 +3253,6 @@ class SpreadsheetHandler:
 
 #  PRODUCTION-GRADE IMAGE REDACTOR 
 class ProductionImageRedactor:
-    """Production-grade image redaction with policy enforcement and audit trails"""
     
     def __init__(self, pii_guard: 'ContextAwarePIIGuard' = None, 
                  policy: RedactionPolicy = None):
