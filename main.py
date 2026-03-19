@@ -63,10 +63,15 @@ def chat():
     try:
         data = request.json
         user_message = data.get('message', '')
+        model = data.get('model', 'llama-3.3-70b-versatile') 
         
         if not user_message:
             return jsonify({'error': 'Empty message'}), 400
-        
+        00
+
+        pipeline.llm_client.model = model
+        pipeline.pii_guard.context_classifier.groq_client.chat.completions
+
         # Process with PII pipeline
         result = pipeline.process_text(user_message, verbose=False)
         
@@ -101,6 +106,9 @@ def chat():
 def upload_file():
     """Handle file uploads and process them"""
     try:
+        model = request.form.get('model', 'llama-3.3-70b-versatile')
+        user_intent = request.form.get('user_intent', '')
+        pipeline.llm_client.model = model
         logger.info("Upload endpoint hit")
         logger.info(f"Request files: {request.files}")
         
@@ -139,7 +147,7 @@ def upload_file():
         elif file_type == 'document':
             result = process_pdf_file(filepath, filename)
         elif file_type == 'spreadsheet':
-            result = process_spreadsheet_file(filepath, filename)
+            result = process_spreadsheet_file(filepath, filename,user_intent)
         else:
             return jsonify({'error': 'Unsupported file type'}), 400
         
@@ -214,7 +222,7 @@ def process_pdf_file(filepath, original_filename):
     """Process PDF with PII redaction"""
     try:
         result = pipeline.pdf_handler.process_pdf(filepath)
-        
+        stats = result.get('stats', {})
         return {
             'success': True,
             'file_type': 'pdf',
@@ -222,8 +230,10 @@ def process_pdf_file(filepath, original_filename):
             'pages': result['pages'],
             'download_url': f"/download/{os.path.basename(result['output_file'])}",
             'summary': {
+                'total_redacted': stats.get('total_redactions', 0),
                 'total_redacted': len(result['pii_found']),
                 'total_kept': len(result.get('entities_kept', [])),
+                'sheets_processed': stats.get('total_pages', 0),   
                 'redacted_entities': result['pii_found'],
                 'kept_entities': result.get('entities_kept', [])
             }
@@ -235,7 +245,7 @@ def process_pdf_file(filepath, original_filename):
         traceback.print_exc()
         raise
 
-def process_spreadsheet_file(filepath, original_filename):
+def process_spreadsheet_file(filepath, original_filename,user_intent=''):
     """Process Excel/CSV with PII redaction"""
     try:
         ext = filepath.rsplit('.', 1)[1].lower()
@@ -244,6 +254,7 @@ def process_spreadsheet_file(filepath, original_filename):
             result = pipeline.spreadsheet_handler.process_csv(filepath)
         else:
             result = pipeline.spreadsheet_handler.process_excel(filepath)
+            filepath, user_intent=user_intent
         
         stats = result['stats']
         

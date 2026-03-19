@@ -1,108 +1,1966 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PII-Safe Chatbot</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RedactIQ — PII-Safe AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #111111;
+    --surface-2: #1a1a1a;
+    --surface-3: #222222;
+    --border: #2a2a2a;
+    --border-2: #333333;
+    --text: #e8e8e8;
+    --text-muted: #666666;
+    --text-dim: #444444;
+    --accent: #ffffff;
+    --accent-green: #22c55e;
+    --accent-red: #ef4444;
+    --accent-amber: #f59e0b;
+    --accent-blue: #3b82f6;
+    --accent-purple: #a855f7;
+    --font-mono: 'Geist Mono', monospace;
+    --font-sans: 'DM Sans', sans-serif;
+    --radius: 8px;
+    --radius-sm: 4px;
+    --sidebar-w: 240px;
+    --panel-w: 360px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; overflow: hidden; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── SCROLLBARS ── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
+
+  /* ── LAYOUT ── */
+  .app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── SIDEBAR ── */
+  .sidebar {
+    width: var(--sidebar-w);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: width 0.25s ease;
+  }
+
+  .sidebar-header {
+    padding: 16px 14px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .logo-icon {
+    width: 26px;
+    height: 26px;
+    background: var(--accent);
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .logo-icon svg { width: 14px; height: 14px; }
+
+  .logo-text {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    color: var(--text);
+  }
+
+  .logo-badge {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: auto;
+    letter-spacing: 0.05em;
+  }
+
+  .new-chat-btn {
+    width: 100%;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    padding: 7px 11px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .new-chat-btn:hover { background: var(--surface-2); border-color: var(--border-2); }
+
+  .sidebar-section {
+    padding: 12px 10px 6px;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .sidebar-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0 4px;
+    margin-bottom: 5px;
+  }
+
+  .history-item {
+    padding: 7px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .history-item:hover { background: var(--surface-3); color: var(--text); }
+  .history-item.active { background: var(--surface-2); color: var(--text); }
+
+  /* ── MODEL SELECTOR ── */
+  .model-section {
+    padding: 10px 10px 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .model-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    padding: 0 2px;
+  }
+
+  .model-select-wrap {
+    position: relative;
+  }
+
+  .model-select {
+    width: 100%;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 7px 28px 7px 9px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    appearance: none;
+    transition: border-color 0.15s;
+    outline: none;
+  }
+
+  .model-select:hover { border-color: var(--border-2); }
+  .model-select:focus { border-color: #444; }
+
+  .model-select-wrap::after {
+    content: '▾';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-dim);
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .model-status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 6px;
+    padding: 0 2px;
+  }
+
+  .model-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-green);
+    flex-shrink: 0;
+    box-shadow: 0 0 5px var(--accent-green);
+  }
+
+  .model-status-text {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+
+  /* ── MAIN AREA ── */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  /* ── TOP BAR ── */
+  .topbar {
+    height: 48px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .topbar-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    font-size: 13px;
+  }
+
+  .icon-btn:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+  .icon-btn.active { background: var(--surface-2); border-color: var(--border-2); color: var(--text); }
+
+  .panel-toggle-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .panel-toggle-btn:hover { border-color: var(--border-2); color: var(--text); background: var(--surface-2); }
+  .panel-toggle-btn.active { border-color: #444; color: var(--text); background: var(--surface-2); }
+
+  .panel-toggle-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: background 0.15s;
+  }
+
+  .panel-toggle-btn.active .panel-toggle-dot { background: var(--accent-green); box-shadow: 0 0 5px var(--accent-green); }
+
+  /* ── CHAT BODY ── */
+  .chat-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .chat-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    text-align: center;
+    gap: 20px;
+  }
+
+  .chat-empty-icon {
+    width: 48px;
+    height: 48px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  .chat-empty h2 {
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .chat-empty p {
+    color: var(--text-muted);
+    font-size: 13px;
+    max-width: 340px;
+    line-height: 1.6;
+  }
+
+  .suggestion-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    max-width: 500px;
+  }
+
+  .chip {
+    padding: 6px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--font-mono);
+  }
+
+  .chip:hover { background: var(--surface-3); border-color: var(--border-2); color: var(--text); }
+
+  /* ── MESSAGES ── */
+  .message-row {
+    display: flex;
+    padding: 4px 0;
+  }
+
+  .message-row.user { justify-content: flex-end; }
+  .message-row.bot { justify-content: flex-start; }
+
+  .message-wrap {
+    max-width: 72%;
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .message-row.user .message-wrap { align-items: flex-end; }
+  .message-row.bot .message-wrap { align-items: flex-start; }
+
+  .message-role {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .message-bubble {
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    word-break: break-word;
+  }
+
+  .message-row.user .message-bubble {
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    border-bottom-right-radius: 3px;
+  }
+
+  .message-row.bot .message-bubble {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-bottom-left-radius: 3px;
+  }
+
+  .message-bubble code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface-3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #a8d8a8;
+  }
+
+  .redact-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.25);
+    color: var(--accent-red);
+    padding: 2px 7px;
+    border-radius: 3px;
+    margin-top: 5px;
+    cursor: default;
+  }
+
+  .typing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    border-bottom-left-radius: 3px;
+  }
+
+  .typing-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    animation: typingBounce 1.2s infinite;
+  }
+
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes typingBounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+
+  /* ── FILE UPLOAD RESULT ── */
+  .file-result-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    max-width: 100%;
+  }
+
+  .file-result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .file-result-name {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .file-type-badge {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    padding: 1px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .badge-img { background: rgba(59,130,246,0.15); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.25); }
+  .badge-pdf { background: rgba(239,68,68,0.15); color: var(--accent-red); border: 1px solid rgba(239,68,68,0.25); }
+  .badge-xlsx { background: rgba(34,197,94,0.15); color: var(--accent-green); border: 1px solid rgba(34,197,94,0.25); }
+
+  .image-comparison-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .image-side { background: var(--surface-2); padding: 8px; }
+
+  .image-side-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+
+  .image-side img {
+    width: 100%;
+    border-radius: 4px;
+    display: block;
+  }
+
+  .file-result-stats {
+    display: flex;
+    gap: 16px;
+    padding: 10px 14px;
+    flex-wrap: wrap;
+  }
+
+  .stat-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .stat-value {
+    font-size: 18px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .stat-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .download-btn {
+    margin: 0 14px 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 13px;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s;
+  }
+
+  .download-btn:hover { border-color: #555; background: #2a2a2a; }
+
+  /* ── INPUT AREA ── */
+  .input-section {
+    border-top: 1px solid var(--border);
+    padding: 14px 20px 16px;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .input-box {
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .input-box:focus-within { border-color: #444; }
+
+  .input-top {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 10px 12px 8px;
+  }
+
+  .input-textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    resize: none;
+    outline: none;
+    max-height: 160px;
+    overflow-y: auto;
+    min-height: 22px;
+  }
+
+  .input-textarea::placeholder { color: var(--text-dim); }
+
+  .send-btn {
+    width: 32px;
+    height: 32px;
+    background: var(--accent);
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: opacity 0.15s, transform 0.1s;
+    align-self: flex-end;
+  }
+
+  .send-btn:hover { opacity: 0.85; }
+  .send-btn:active { transform: scale(0.94); }
+  .send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .send-btn svg { width: 14px; height: 14px; fill: #000; }
+
+  .input-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 12px 9px;
+    border-top: 1px solid var(--border);
+  }
+
+  .input-actions { display: flex; align-items: center; gap: 6px; }
+
+  .input-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .input-action-btn:hover { border-color: var(--border-2); color: var(--text); background: var(--surface-3); }
+
+  .input-hint {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+  }
+
+  /* ── REDACTION PANEL ── */
+  .redact-panel {
+    width: var(--panel-w);
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transform: translateX(0);
+    transition: width 0.25s ease, opacity 0.2s;
+  }
+
+  .redact-panel.hidden {
+    width: 0;
+    overflow: hidden;
+    opacity: 0;
+    border-left-color: transparent;
+  }
+
+  .panel-header {
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-header-icon {
+    width: 22px;
+    height: 22px;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+  }
+
+  .panel-header-title {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+
+  .panel-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 3px;
+    transition: color 0.15s;
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .panel-close:hover { color: var(--text); }
+
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .panel-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 10px;
+    padding: 30px 16px;
+  }
+
+  .panel-empty-icon {
+    font-size: 26px;
+    opacity: 0.25;
+  }
+
+  .panel-empty p {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  /* ── PANEL SECTIONS ── */
+  .panel-section { display: flex; flex-direction: column; gap: 6px; }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 0 2px;
+  }
+
+  .section-title {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .section-count {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: var(--surface-3);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+
+  /* ── REDACTION CARDS ── */
+  .redact-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    animation: fadeSlideIn 0.25s ease both;
+  }
+
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .redact-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+  }
+
+  .entity-type-badge {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    padding: 2px 7px;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .type-person { background: rgba(168,85,247,0.12); color: var(--accent-purple); border: 1px solid rgba(168,85,247,0.2); }
+  .type-email { background: rgba(59,130,246,0.12); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.2); }
+  .type-phone { background: rgba(245,158,11,0.12); color: var(--accent-amber); border: 1px solid rgba(245,158,11,0.2); }
+  .type-id { background: rgba(239,68,68,0.12); color: var(--accent-red); border: 1px solid rgba(239,68,68,0.2); }
+  .type-other { background: rgba(232,232,232,0.07); color: var(--text-muted); border: 1px solid var(--border); }
+
+  .redact-card-severity {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .severity-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+  }
+
+  .sev-critical { background: var(--accent-red); }
+  .sev-high { background: var(--accent-amber); }
+  .sev-medium { background: var(--accent-blue); }
+
+  .redact-card-body {
+    padding: 0 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .redact-val-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+
+  .redact-val-label {
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    min-width: 48px;
+    font-size: 10px;
+  }
+
+  .redact-original {
+    font-family: var(--font-mono);
+    color: var(--accent-red);
+    background: rgba(239,68,68,0.08);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    text-decoration: line-through;
+    opacity: 0.85;
+    word-break: break-all;
+  }
+
+  .redact-arrow { color: var(--text-dim); font-size: 10px; }
+
+  .redact-placeholder {
+    font-family: var(--font-mono);
+    color: var(--accent-green);
+    background: rgba(34,197,94,0.08);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    word-break: break-all;
+  }
+
+  /* ── INTENT CARD ── */
+  .intent-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .intent-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .intent-key {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    min-width: 56px;
+    padding-top: 1px;
+  }
+
+  .intent-val {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    text-align: right;
+    line-height: 1.5;
+  }
+
+  .intent-tag {
+    display: inline-flex;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .intent-redact { background: rgba(239,68,68,0.12); color: var(--accent-red); border: 1px solid rgba(239,68,68,0.2); }
+  .intent-compute { background: rgba(34,197,94,0.12); color: var(--accent-green); border: 1px solid rgba(34,197,94,0.2); }
+  .intent-transform { background: rgba(59,130,246,0.12); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.2); }
+
+  /* ── SUMMARY BAR ── */
+  .summary-bar {
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+
+  .summary-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .summary-num {
+    font-size: 20px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .summary-lbl {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    text-align: center;
+  }
+
+  .summary-divider { width: 1px; background: var(--border); }
+
+  /* ── KEPT ENTITIES ── */
+  .kept-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    background: rgba(34,197,94,0.07);
+    border: 1px solid rgba(34,197,94,0.18);
+    border-radius: 20px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--accent-green);
+    margin: 2px;
+  }
+
+  .kept-chip-icon { font-size: 9px; }
+
+  .kept-chips-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    padding: 4px 0;
+  }
+
+  /* ── DIVIDER ── */
+  .panel-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+  }
+
+  /* ── UPLOAD ZONE ── */
+  .upload-zone {
+    border: 1px dashed var(--border-2);
+    border-radius: var(--radius-sm);
+    padding: 24px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: transparent;
+  }
+
+  .upload-zone:hover { border-color: #444; background: var(--surface-2); }
+  .upload-zone.drag-over { border-color: var(--accent-blue); background: rgba(59,130,246,0.05); }
+
+  .upload-zone-icon { font-size: 22px; margin-bottom: 8px; opacity: 0.5; }
+
+  .upload-zone-text {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  /* ── FILE UPLOAD PREVIEW ── */
+  .file-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    margin-bottom: 4px;
+  }
+
+  .file-preview-icon { font-size: 16px; }
+
+  .file-preview-name {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .file-preview-remove {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px;
+    font-size: 12px;
+    transition: color 0.15s;
+  }
+
+  .file-preview-remove:hover { color: var(--accent-red); }
+
+  /* ── UPLOADING STATE ── */
+  .upload-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-2);
+    border-top-color: var(--text-muted);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .upload-progress-text {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* ── TOAST ── */
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 100;
+  }
+
+  .toast {
+    padding: 9px 14px;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    animation: toastIn 0.2s ease both, toastOut 0.2s ease 3.8s both;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 280px;
+  }
+
+  .toast.error { border-color: rgba(239,68,68,0.35); color: var(--accent-red); }
+
+  @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateY(8px); } }
+
+  /* ── PULSE ANIMATION FOR LOADING ── */
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .pulse { animation: pulse 1.5s ease infinite; }
+
+  /* ── MOBILE / RESPONSIVE ── */
+  @media (max-width: 900px) {
+    .sidebar { width: 0; overflow: hidden; border-right-color: transparent; }
+    .redact-panel { display: none; }
+  }
+
+  /* ── FILE HIDDEN INPUT ── */
+  #fileInput { display: none; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <h1>🔒 PII-Safe Chatbot</h1>
-                <p class="subtitle">Context-aware AI with automatic PII redaction</p>
-            </div>
-            <button id="btsToggle" class="bts-toggle">
-                <span id="btsIcon">👁️</span> Behind the Scenes
+
+<div class="app">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="3" width="14" height="14" rx="2" fill="#000"/>
+            <path d="M7 7h6M7 10h4M7 13h5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+            <circle cx="15" cy="15" r="3.5" fill="#000" stroke="#fff" stroke-width="1"/>
+            <path d="M14.5 15h1M15 14.5v1" stroke="#fff" stroke-width="1" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <span class="logo-text">RedactIQ</span>
+        <span class="logo-badge">v2.0</span>
+      </div>
+      <button class="new-chat-btn" id="newChatBtn">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        New chat
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Recent</div>
+      <div class="history-item active">Current session</div>
+      <div class="history-item">Employee PII redaction</div>
+      <div class="history-item">Aadhaar card processing</div>
+      <div class="history-item">HR excel redaction</div>
+    </div>
+
+    <div class="model-section">
+      <div class="model-label">Model</div>
+      <div class="model-select-wrap">
+        <select class="model-select" id="modelSelect">
+          <optgroup label="Groq / LLaMA">
+            <option value="llama-3.3-70b-versatile" selected>llama-3.3-70b-versatile</option>
+            <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+            <option value="llama-3.2-90b-vision-preview">llama-3.2-90b-vision</option>
+            <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
+          </optgroup>
+          <optgroup label="Groq / Gemma">
+            <option value="gemma2-9b-it">gemma2-9b-it</option>
+          </optgroup>
+          <optgroup label="Anthropic">
+            <option value="claude-3-5-haiku-20241022">claude-3-5-haiku</option>
+            <option value="claude-sonnet-4-5">claude-sonnet-4-5</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="model-status">
+        <div class="model-dot"></div>
+        <span class="model-status-text" id="modelStatusText">Connected · Groq</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN CHAT ── -->
+  <main class="main">
+
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <span class="topbar-title" id="topbarTitle">New chat</span>
+      </div>
+      <div class="topbar-right">
+        <button class="panel-toggle-btn" id="panelToggle">
+          <div class="panel-toggle-dot"></div>
+          Behind the scenes
+        </button>
+      </div>
+    </div>
+
+    <!-- CHAT BODY -->
+    <div class="chat-body" id="chatBody">
+      <div class="chat-empty" id="chatEmpty">
+        <div class="chat-empty-icon">🔒</div>
+        <div>
+          <h2>PII-Safe AI Assistant</h2>
+          <p>Send a message or upload a file. Your personal data is automatically detected and redacted before reaching the AI.</p>
+        </div>
+        <div class="suggestion-chips">
+          <div class="chip" onclick="insertSuggestion(this)">My name is Harshal, email is harshal@acme.com</div>
+          <div class="chip" onclick="insertSuggestion(this)">Redact this Aadhaar: 2345 6789 0123</div>
+          <div class="chip" onclick="insertSuggestion(this)">My phone is +91 9876543210, help me draft an email</div>
+          <div class="chip" onclick="insertSuggestion(this)">PAN ABCDE1234F belongs to our client</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INPUT AREA -->
+    <div class="input-section">
+      <div id="filePreviewArea"></div>
+      <div class="input-box">
+        <div class="input-top">
+          <textarea
+            class="input-textarea"
+            id="inputTextarea"
+            placeholder="Message RedactIQ..."
+            rows="1"
+          ></textarea>
+          <button class="send-btn" id="sendBtn" disabled>
+            <svg viewBox="0 0 16 16"><path d="M2 8l12-6-5 6 5 6-12-6z"/></svg>
+          </button>
+        </div>
+        <div class="input-bottom">
+          <div class="input-actions">
+            <button class="input-action-btn" id="attachBtn">
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                <path d="M9.5 5.5L5 10a3.5 3.5 0 01-4.95-4.95l5.5-5.5A2.25 2.25 0 019.73 2.73L4.23 8.23a1 1 0 01-1.41-1.41l5-5" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Attach file
             </button>
-        </header>
-
-        <!-- Main Layout -->
-        <div class="main-layout">
-            <!-- Chat Panel -->
-            <div class="chat-panel" id="chatPanel">
-                <div class="chat-container">
-                    <div id="chatMessages" class="chat-messages">
-                        <div class="message bot-message">
-                            <div class="message-content">
-                                <strong>🤖 Assistant</strong>
-                                <p>Hello! I'm your PII-safe assistant. How i can help you ?</p>
-                                
-                                <!-- <p style="margin-top: 0.5rem;">Try typing a message or uploading a file!</p> -->
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Input Area -->
-                    <div class="input-area">
-                        <div class="input-container">
-                            <button id="attachBtn" class="attach-btn" title="Upload file">
-                                📎
-                            </button>
-                            <textarea 
-                                id="userInput" 
-                                placeholder="Type your message... (Your PII will be protected automatically)"
-                                rows="1"
-                            ></textarea>
-                            <button id="sendBtn" class="send-btn">
-                                <span id="sendIcon">➤</span>
-                            </button>
-                        </div>
-                        <div class="input-footer">
-                            <span class="status-indicator" id="statusIndicator">
-                                <span class="dot"></span> Ready
-                            </span>
-                            <span class="file-types">
-                                Supports: PNG, JPG, PDF, XLSX, CSV
-                            </span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- BTS Panel (Hidden by default) -->
-            <div class="bts-panel" id="btsPanel">
-                <div class="bts-container">
-                    <h3>🔍 Behind the Scenes</h3>
-                    <p class="bts-description">See how your messages and files are redacted</p>
-
-                    <div id="btsContent" class="bts-content">
-                        <div class="bts-placeholder">
-                            <svg width="100" height="100" viewBox="0 0 100 100">
-                                <circle cx="50" cy="50" r="40" stroke="#ddd" stroke-width="2" fill="none"/>
-                                <path d="M50 30 L50 70 M30 50 L70 50" stroke="#ddd" stroke-width="2"/>
-                            </svg>
-                            <p>Send a message or upload a file to see the redaction process</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
+          </div>
+          <span class="input-hint">Enter ↵ to send · Shift+Enter for newline</span>
         </div>
+      </div>
     </div>
 
-    <!-- Hidden file input -->
-    <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.bmp,.pdf,.xlsx,.xls,.csv" style="display: none;">
+  </main>
 
-    <!-- Image Preview Modal -->
-    <div id="imageModal" class="modal">
-        <div class="modal-content">
-            <span class="modal-close">&times;</span>
-            <h3 id="modalTitle">Image Comparison</h3>
-            <div class="image-comparison">
-                <div class="comparison-side">
-                    <h4>Original</h4>
-                    <img id="originalImage" src="" alt="Original">
-                </div>
-                <div class="comparison-side">
-                    <h4>Redacted</h4>
-                    <img id="redactedImage" src="" alt="Redacted">
-                </div>
-            </div>
-        </div>
+  <!-- ── REDACTION PANEL ── -->
+  <aside class="redact-panel hidden" id="redactPanel">
+    <div class="panel-header">
+      <div class="panel-header-left">
+        <div class="panel-header-icon">🔍</div>
+        <span class="panel-header-title">Redaction Activity</span>
+      </div>
+      <button class="panel-close" id="panelClose">✕</button>
     </div>
 
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <div class="panel-body" id="panelBody">
+      <div class="panel-empty" id="panelEmpty">
+        <div class="panel-empty-icon">🛡️</div>
+        <p>No activity yet.<br>Send a message to see redactions here.</p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- TOAST CONTAINER -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- HIDDEN FILE INPUT -->
+<input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.bmp,.pdf,.xlsx,.xls,.csv">
+
+<script>
+/* ══════════════════════════════════════════════════
+   REDACTIQ FRONTEND — app.js (inline)
+══════════════════════════════════════════════════ */
+
+const API_BASE = '';
+
+// ── State ──────────────────────────────────────────
+let isProcessing = false;
+let pendingFile = null;
+let panelOpen = false;
+let messageCount = 0;
+
+// ── DOM refs ───────────────────────────────────────
+const chatBody       = document.getElementById('chatBody');
+const chatEmpty      = document.getElementById('chatEmpty');
+const inputTA        = document.getElementById('inputTextarea');
+const sendBtn        = document.getElementById('sendBtn');
+const attachBtn      = document.getElementById('attachBtn');
+const fileInput      = document.getElementById('fileInput');
+const filePreviewArea = document.getElementById('filePreviewArea');
+const panelToggle    = document.getElementById('panelToggle');
+const panelClose     = document.getElementById('panelClose');
+const redactPanel    = document.getElementById('redactPanel');
+const panelBody      = document.getElementById('panelBody');
+const panelEmpty     = document.getElementById('panelEmpty');
+const modelSelect    = document.getElementById('modelSelect');
+const modelStatusTxt = document.getElementById('modelStatusText');
+const newChatBtn     = document.getElementById('newChatBtn');
+const toastContainer = document.getElementById('toastContainer');
+
+// ── Input auto-resize ──────────────────────────────
+inputTA.addEventListener('input', () => {
+  inputTA.style.height = 'auto';
+  inputTA.style.height = Math.min(inputTA.scrollHeight, 160) + 'px';
+  sendBtn.disabled = !inputTA.value.trim() && !pendingFile;
+});
+
+inputTA.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (!sendBtn.disabled && !isProcessing) handleSend();
+  }
+});
+
+// ── Model selector ─────────────────────────────────
+modelSelect.addEventListener('change', () => {
+  const val = modelSelect.value;
+  const provider = val.includes('claude') ? 'Anthropic' :
+                   val.includes('gemma')  ? 'Groq / Gemma' : 'Groq / LLaMA';
+  modelStatusTxt.textContent = `Connected · ${provider}`;
+});
+
+// ── Panel toggle ───────────────────────────────────
+panelToggle.addEventListener('click', () => togglePanel());
+panelClose.addEventListener('click', () => togglePanel(false));
+
+function togglePanel(state) {
+  panelOpen = state !== undefined ? state : !panelOpen;
+  redactPanel.classList.toggle('hidden', !panelOpen);
+  panelToggle.classList.toggle('active', panelOpen);
+}
+
+// ── New chat ───────────────────────────────────────
+newChatBtn.addEventListener('click', () => {
+  // Remove all messages except empty state
+  [...chatBody.children].forEach(c => { if (c !== chatEmpty) c.remove(); });
+  chatEmpty.style.display = 'flex';
+  messageCount = 0;
+  clearPanel();
+  pendingFile = null;
+  filePreviewArea.innerHTML = '';
+  inputTA.value = '';
+  inputTA.style.height = '';
+  sendBtn.disabled = true;
+  document.getElementById('topbarTitle').textContent = 'New chat';
+});
+
+// ── File attach ────────────────────────────────────
+attachBtn.addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) setFile(e.target.files[0]);
+});
+
+// Drag & drop on input section
+const inputSection = document.querySelector('.input-section');
+inputSection.addEventListener('dragover', e => { e.preventDefault(); inputSection.classList.add('drag-over'); });
+inputSection.addEventListener('dragleave', () => inputSection.classList.remove('drag-over'));
+inputSection.addEventListener('drop', e => {
+  e.preventDefault();
+  inputSection.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+});
+
+function setFile(file) {
+  pendingFile = file;
+  const ext = file.name.split('.').pop().toLowerCase();
+  const icons = { pdf: '📄', xlsx: '📊', xls: '📊', csv: '📊', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', bmp: '🖼️' };
+  filePreviewArea.innerHTML = `
+    <div class="file-preview">
+      <span class="file-preview-icon">${icons[ext] || '📎'}</span>
+      <span class="file-preview-name">${file.name}</span>
+      <button class="file-preview-remove" onclick="clearFile()">✕</button>
+    </div>
+  `;
+  sendBtn.disabled = false;
+}
+
+function clearFile() {
+  pendingFile = null;
+  filePreviewArea.innerHTML = '';
+  fileInput.value = '';
+  sendBtn.disabled = !inputTA.value.trim();
+}
+
+// ── Send ───────────────────────────────────────────
+sendBtn.addEventListener('click', handleSend);
+
+async function handleSend() {
+  if (isProcessing) return;
+  const text = inputTA.value.trim();
+  if (!text && !pendingFile) return;
+
+  hideChatEmpty();
+  isProcessing = true;
+  sendBtn.disabled = true;
+  messageCount++;
+
+  // Update topbar
+  if (messageCount === 1) {
+    document.getElementById('topbarTitle').textContent =
+      text ? text.slice(0, 40) + (text.length > 40 ? '…' : '') : pendingFile.name;
+  }
+
+  if (pendingFile) {
+    // File flow
+    appendUserMessage(text || `Processing: ${pendingFile.name}`, null);
+    inputTA.value = '';
+    inputTA.style.height = '';
+    const file = pendingFile;
+    clearFile();
+    await handleFileUpload(file, text);
+  } else {
+    // Text flow
+    appendUserMessage(text, null);
+    inputTA.value = '';
+    inputTA.style.height = '';
+    sendBtn.disabled = true;
+    await handleTextChat(text);
+  }
+
+  isProcessing = false;
+  sendBtn.disabled = !inputTA.value.trim() && !pendingFile;
+}
+
+// ── Text chat ──────────────────────────────────────
+async function handleTextChat(message) {
+  const typingId = appendTyping();
+  try {
+    const resp = await fetch(`${API_BASE}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, model: modelSelect.value })
+    });
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    removeTyping(typingId);
+
+    // Build bot message
+    const hasRedactions = data.redaction_summary?.total_redacted > 0;
+    appendBotMessage(data.llm_response, hasRedactions ? data.redaction_summary.total_redacted : 0);
+
+    // Update panel
+    updatePanel({
+      type: 'text',
+      original: data.original_message,
+      redacted: data.redacted_message,
+      entities: data.redaction_summary?.redacted_entities || {},
+      kept: data.redaction_summary?.kept_entities || [],
+      report: data.redaction_summary?.redaction_report || {},
+      intent: null
+    });
+
+  } catch (err) {
+    removeTyping(typingId);
+    appendBotMessage('⚠ Could not connect to backend. Make sure Flask is running on port 5000.', 0);
+    showToast(err.message, 'error');
+  }
+}
+
+// ── File upload ────────────────────────────────────
+async function handleFileUpload(file, intent) {
+  const typingId = appendTyping();
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (intent) formData.append('user_intent', intent);
+    formData.append('model', modelSelect.value);
+
+    const resp = await fetch(`${API_BASE}/upload`, {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    removeTyping(typingId);
+
+    if (data.file_type === 'image') {
+      appendImageResult(file.name, data);
+    } else {
+      appendFileResult(file.name, data);
+    }
+
+    // Update panel with file stats
+    updatePanelFile(data);
+
+  } catch (err) {
+    removeTyping(typingId);
+    appendBotMessage(`⚠ Upload failed: ${err.message}`, 0);
+    showToast(err.message, 'error');
+  }
+}
+
+// ── Append helpers ─────────────────────────────────
+function hideChatEmpty() {
+  if (chatEmpty) chatEmpty.style.display = 'none';
+}
+
+function appendUserMessage(text) {
+  const row = document.createElement('div');
+  row.className = 'message-row user';
+  row.innerHTML = `
+    <div class="message-wrap">
+      <div class="message-role">You</div>
+      <div class="message-bubble">${escHtml(text)}</div>
+    </div>
+  `;
+  chatBody.appendChild(row);
+  scrollBottom();
+}
+
+function appendBotMessage(text, redactCount) {
+  const row = document.createElement('div');
+  row.className = 'message-row bot';
+  const badge = redactCount > 0
+    ? `<span class="redact-badge">🛡 ${redactCount} entity${redactCount > 1 ? 'ies' : ''} redacted</span>`
+    : '';
+  row.innerHTML = `
+    <div class="message-wrap">
+      <div class="message-role">Assistant</div>
+      <div class="message-bubble">${formatText(text)}</div>
+      ${badge}
+    </div>
+  `;
+  chatBody.appendChild(row);
+  scrollBottom();
+}
+
+function appendTyping() {
+  const id = 'typing-' + Date.now();
+  const row = document.createElement('div');
+  row.className = 'message-row bot';
+  row.id = id;
+  row.innerHTML = `
+    <div class="message-wrap">
+      <div class="message-role pulse">Processing…</div>
+      <div class="typing-indicator">
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+      </div>
+    </div>
+  `;
+  chatBody.appendChild(row);
+  scrollBottom();
+  return id;
+}
+
+function removeTyping(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+function appendImageResult(name, data) {
+  const ext = name.split('.').pop().toUpperCase();
+  const summary = data.summary || {};
+  const row = document.createElement('div');
+  row.className = 'message-row bot';
+  row.innerHTML = `
+    <div class="message-wrap" style="max-width:85%">
+      <div class="message-role">RedactIQ · Image</div>
+      <div class="file-result-card">
+        <div class="file-result-header">
+          <div class="file-result-name">
+            <span class="entity-type-badge type-id file-type-badge badge-img">${ext}</span>
+            ${escHtml(name)}
+          </div>
+        </div>
+        <div class="image-comparison-row">
+          <div class="image-side">
+            <div class="image-side-label">Original</div>
+            <img src="${data.original_image}" alt="Original">
+          </div>
+          <div class="image-side">
+            <div class="image-side-label">Redacted</div>
+            <img src="${data.redacted_image}" alt="Redacted">
+          </div>
+        </div>
+        <div class="file-result-stats">
+          <div class="stat-item">
+            <span class="stat-value">${summary.total_detections ?? 0}</span>
+            <span class="stat-label">Detected</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">${summary.total_redactions ?? 0}</span>
+            <span class="stat-label">Redacted</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">${Object.keys(summary.by_type || {}).length}</span>
+            <span class="stat-label">Types</span>
+          </div>
+        </div>
+        <a class="download-btn" href="${data.download_url}" download>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M6 2v6M3 6l3 3 3-3M2 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Download redacted file
+        </a>
+      </div>
+    </div>
+  `;
+  chatBody.appendChild(row);
+  scrollBottom();
+}
+
+function appendFileResult(name, data) {
+  const ext = name.split('.').pop().toLowerCase();
+  const summary = data.summary || {};
+  const badgeClass = ext === 'pdf' ? 'badge-pdf' : 'badge-xlsx';
+  const row = document.createElement('div');
+  row.className = 'message-row bot';
+  row.innerHTML = `
+    <div class="message-wrap" style="max-width:75%">
+      <div class="message-role">RedactIQ · ${ext.toUpperCase()}</div>
+      <div class="file-result-card">
+        <div class="file-result-header">
+          <div class="file-result-name">
+            <span class="entity-type-badge file-type-badge ${badgeClass}">${ext.toUpperCase()}</span>
+            ${escHtml(name)}
+          </div>
+        </div>
+        <div class="file-result-stats">
+          <div class="stat-item">
+            <span class="stat-value">${summary.cells_redacted ?? summary.total_redacted ?? 0}</span>
+            <span class="stat-label">Redacted</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">${summary.sheets_processed ?? summary.total_kept ?? '—'}</span>
+            <span class="stat-label">${ext === 'pdf' ? 'Pages' : 'Sheets'}</span>
+          </div>
+        </div>
+        <a class="download-btn" href="${data.download_url}" download>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M6 2v6M3 6l3 3 3-3M2 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Download redacted file
+        </a>
+      </div>
+    </div>
+  `;
+  chatBody.appendChild(row);
+  scrollBottom();
+}
+
+// ── Redaction Panel ────────────────────────────────
+function clearPanel() {
+  panelBody.innerHTML = '';
+  panelBody.appendChild(createPanelEmpty());
+}
+
+function createPanelEmpty() {
+  const el = document.createElement('div');
+  el.className = 'panel-empty';
+  el.id = 'panelEmpty';
+  el.innerHTML = `<div class="panel-empty-icon">🛡️</div><p>No activity yet.<br>Send a message to see redactions here.</p>`;
+  return el;
+}
+
+function updatePanel({ type, original, redacted, entities, kept, report, intent }) {
+  // Remove empty state
+  panelBody.innerHTML = '';
+
+  const redactedEntries = Object.entries(entities || {});
+  const keptArr = kept || [];
+  const totalRedacted = redactedEntries.length;
+  const totalKept = keptArr.length;
+
+  // Summary bar
+  const summaryEl = document.createElement('div');
+  summaryEl.className = 'panel-section';
+  summaryEl.innerHTML = `
+    <div class="summary-bar">
+      <div class="summary-stat">
+        <span class="summary-num">${totalRedacted}</span>
+        <span class="summary-lbl">Redacted</span>
+      </div>
+      <div class="summary-stat">
+        <span class="summary-num">${totalKept}</span>
+        <span class="summary-lbl">Kept</span>
+      </div>
+      <div class="summary-stat">
+        <span class="summary-num">${totalRedacted + totalKept}</span>
+        <span class="summary-lbl">Total</span>
+      </div>
+    </div>
+  `;
+  panelBody.appendChild(summaryEl);
+
+  // Redacted entities section
+  if (redactedEntries.length > 0) {
+    const sec = document.createElement('div');
+    sec.className = 'panel-section';
+    sec.innerHTML = `
+      <div class="section-header">
+        <span class="section-title">Redacted Entities</span>
+        <span class="section-count">${totalRedacted}</span>
+      </div>
+    `;
+
+    redactedEntries.slice(0, 20).forEach(([placeholder, info]) => {
+      const original_val = typeof info === 'object' ? info.value : info;
+      const classif = typeof info === 'object' ? info.classification : '';
+      const entityType = guessEntityType(placeholder, original_val, classif);
+      const badgeClass = getTypeBadgeClass(entityType);
+      const severity = getSeverity(entityType);
+
+      const card = document.createElement('div');
+      card.className = 'redact-card';
+      card.innerHTML = `
+        <div class="redact-card-header">
+          <span class="entity-type-badge ${badgeClass}">${entityType}</span>
+          <span class="redact-card-severity">
+            <span class="severity-dot ${severity.cls}"></span>
+            ${severity.label}
+          </span>
+        </div>
+        <div class="redact-card-body">
+          <div class="redact-val-row">
+            <span class="redact-val-label">original</span>
+            <span class="redact-original">${escHtml(original_val)}</span>
+          </div>
+          <div class="redact-val-row">
+            <span class="redact-val-label">→</span>
+            <span class="redact-placeholder">${escHtml(placeholder)}</span>
+          </div>
+          ${classif ? `<div class="redact-val-row"><span class="redact-val-label">class</span><span style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim)">${escHtml(classif)}</span></div>` : ''}
+        </div>
+      `;
+      sec.appendChild(card);
+    });
+
+    panelBody.appendChild(sec);
+  }
+
+  // Kept entities section
+  if (keptArr.length > 0) {
+    const div = document.createElement('div');
+    div.className = 'panel-section';
+    div.innerHTML = `
+      <div class="section-header">
+        <span class="section-title">Kept (Public / Safe)</span>
+        <span class="section-count">${keptArr.length}</span>
+      </div>
+      <div class="kept-chips-wrap">
+        ${keptArr.map(e => `<span class="kept-chip"><span class="kept-chip-icon">✓</span>${escHtml(e)}</span>`).join('')}
+      </div>
+    `;
+    panelBody.appendChild(div);
+  }
+
+  // Report categories
+  if (report && report.redacted_by_category) {
+    const cats = Object.entries(report.redacted_by_category);
+    if (cats.length > 0) {
+      const div = document.createElement('div');
+      div.className = 'panel-section';
+      div.innerHTML = `
+        <div class="section-header">
+          <span class="section-title">By Category</span>
+        </div>
+        <div class="intent-card">
+          ${cats.map(([cat, cnt]) => `
+            <div class="intent-row">
+              <span class="intent-key">${escHtml(cat.slice(0,14))}</span>
+              <span class="intent-val">${cnt} found</span>
+            </div>
+          `).join('<div class="panel-divider"></div>')}
+        </div>
+      `;
+      panelBody.appendChild(div);
+    }
+  }
+
+  // Auto-open panel if not open and there are redactions
+  if (!panelOpen && totalRedacted > 0) {
+    togglePanel(true);
+  }
+}
+
+function updatePanelFile(data) {
+  panelBody.innerHTML = '';
+
+  const summary = data.summary || {};
+  const cells = summary.cells_redacted ?? summary.total_redacted ?? 0;
+
+  const sec = document.createElement('div');
+  sec.className = 'panel-section';
+  sec.innerHTML = `
+    <div class="summary-bar">
+      <div class="summary-stat">
+        <span class="summary-num">${cells}</span>
+        <span class="summary-lbl">Redacted</span>
+      </div>
+      <div class="summary-stat">
+        <span class="summary-num">${summary.sheets_processed ?? summary.total_kept ?? 0}</span>
+        <span class="summary-lbl">${data.file_type === 'pdf' ? 'Pages' : 'Sheets'}</span>
+      </div>
+      <div class="summary-stat">
+        <span class="summary-num">${summary.total_detections ?? 0}</span>
+        <span class="summary-lbl">Detected</span>
+      </div>
+    </div>
+  `;
+  panelBody.appendChild(sec);
+
+  // Detections for images
+  if (data.detections && data.detections.length > 0) {
+    const det = document.createElement('div');
+    det.className = 'panel-section';
+    det.innerHTML = `
+      <div class="section-header">
+        <span class="section-title">Visual Detections</span>
+        <span class="section-count">${data.detections.length}</span>
+      </div>
+    `;
+    data.detections.forEach(d => {
+      const card = document.createElement('div');
+      card.className = 'redact-card';
+      card.innerHTML = `
+        <div class="redact-card-header">
+          <span class="entity-type-badge type-id">${escHtml(d.type || 'DETECTION')}</span>
+          <span class="redact-card-severity">
+            <span class="severity-dot sev-high"></span>
+            Redacted
+          </span>
+        </div>
+        <div class="redact-card-body">
+          <div class="redact-val-row">
+            <span class="redact-val-label">conf</span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">${Math.round((d.confidence||0)*100)}%</span>
+          </div>
+        </div>
+      `;
+      det.appendChild(card);
+    });
+    panelBody.appendChild(det);
+  }
+
+  if (!panelOpen) togglePanel(true);
+}
+
+// ── Suggestion chips ───────────────────────────────
+function insertSuggestion(el) {
+  inputTA.value = el.textContent.trim();
+  inputTA.style.height = 'auto';
+  inputTA.style.height = Math.min(inputTA.scrollHeight, 160) + 'px';
+  sendBtn.disabled = false;
+  inputTA.focus();
+}
+
+// ── Toast ──────────────────────────────────────────
+function showToast(msg, type = '') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  toastContainer.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+// ── Helpers ────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatText(s) {
+  return escHtml(s).replace(/\n/g, '<br>').replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function scrollBottom() {
+  chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: 'smooth' });
+}
+
+function guessEntityType(placeholder, value, classif) {
+  const p = placeholder.toUpperCase();
+  if (p.includes('EMAIL')) return 'EMAIL';
+  if (p.includes('PHONE') || p.includes('INDIAN')) return 'PHONE';
+  if (p.includes('AADHAAR')) return 'AADHAAR';
+  if (p.includes('PAN')) return 'PAN';
+  if (p.includes('PERSON') || p.includes('NAME') || p.includes('MY') || p.includes('COLLEAGUE') || p.includes('CLIENT')) return 'PERSON';
+  if (p.includes('EMPLOYEE') || p.includes('EMP')) return 'EMP ID';
+  if (p.includes('PASSPORT')) return 'PASSPORT';
+  if (p.includes('BANK') || p.includes('IFSC') || p.includes('SALARY')) return 'FINANCIAL';
+  if (p.includes('MEDICAL') || p.includes('HEALTH') || p.includes('BLOOD')) return 'MEDICAL';
+  if (classif) return classif.slice(0, 12);
+  return 'PII';
+}
+
+function getTypeBadgeClass(t) {
+  const m = { 'EMAIL': 'type-email', 'PHONE': 'type-phone', 'PERSON': 'type-person', 'AADHAAR': 'type-id', 'PAN': 'type-id', 'PASSPORT': 'type-id', 'EMP ID': 'type-id', 'MEDICAL': 'type-id', 'FINANCIAL': 'type-phone' };
+  return m[t] || 'type-other';
+}
+
+function getSeverity(t) {
+  const critical = ['AADHAAR','PAN','PASSPORT','EMP ID','MEDICAL','FINANCIAL'];
+  const high = ['PERSON','EMAIL','PHONE'];
+  if (critical.includes(t)) return { cls: 'sev-critical', label: 'CRITICAL' };
+  if (high.includes(t)) return { cls: 'sev-high', label: 'HIGH' };
+  return { cls: 'sev-medium', label: 'MEDIUM' };
+}
+</script>
 </body>
 </html>

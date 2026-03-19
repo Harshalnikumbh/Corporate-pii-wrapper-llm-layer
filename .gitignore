@@ -9,7 +9,7 @@ pii_redaction.log
 test_ocr.py
 test.py
 yolov8s.pt
-
+test_files/
 # Ignore all JSON files ONLY in root directory
 /*.json
 /imgs
