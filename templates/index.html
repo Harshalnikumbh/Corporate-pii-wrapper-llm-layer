@@ -1204,12 +1204,20 @@
       </button>
     </div>
 
-    <div class="sidebar-section">
-      <div class="sidebar-label">Recent</div>
-      <div class="history-item active">Current session</div>
-      <div class="history-item">Employee PII redaction</div>
-      <div class="history-item">Aadhaar card processing</div>
-      <div class="history-item">HR excel redaction</div>
+     <div class="sidebar-section">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px;margin-bottom:5px;">
+        <div class="sidebar-label" style="margin-bottom:0">Recent</div>
+        <button
+          onclick="clearAllHistory()"
+          title="Clear history"
+          style="background:none;border:none;color:var(--text-dim);font-size:11px;cursor:pointer;font-family:var(--font-mono);padding:1px 4px;border-radius:3px;transition:color .15s"
+          onmouseover="this.style.color='var(--accent-red)'"
+          onmouseout="this.style.color='var(--text-dim)'"
+        >clear</button>
+      </div>
+      <div id="historyList">
+        <div style="padding:8px 4px;font-size:11px;font-family:var(--font-mono);color:var(--text-dim)">Loading…</div>
+      </div>
     </div>
 
     <div class="model-section">
@@ -1340,6 +1348,8 @@ let isProcessing = false;
 let pendingFile = null;
 let panelOpen = false;
 let messageCount = 0;
+let currentSessionId = null;
+let currentMessages = [];
 
 // ── DOM refs ───────────────────────────────────────
 const chatBody       = document.getElementById('chatBody');
@@ -1404,6 +1414,8 @@ newChatBtn.addEventListener('click', () => {
   inputTA.style.height = '';
   sendBtn.disabled = true;
   document.getElementById('topbarTitle').textContent = 'New chat';
+  currentSessionId = null;
+  currentMessages = [];
 });
 
 // ── File attach ────────────────────────────────────
@@ -1471,6 +1483,7 @@ async function handleSend() {
     const file = pendingFile;
     clearFile();
     await handleFileUpload(file, text);
+    await saveSessionMessages();
   } else {
     // Text flow
     appendUserMessage(text, null);
@@ -1478,6 +1491,7 @@ async function handleSend() {
     inputTA.style.height = '';
     sendBtn.disabled = true;
     await handleTextChat(text);
+    await saveSessionMessages();
   }
 
   isProcessing = false;
@@ -1497,6 +1511,15 @@ async function handleTextChat(message) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     removeTyping(typingId);
+
+    // Track session
+    if (data.session_id) currentSessionId = data.session_id;
+    currentMessages.push({ role: 'user', text: message, redact_count: 0 });
+    currentMessages.push({
+      role: 'bot',
+      text: data.llm_response,
+      redact_count: data.redaction_summary?.total_redacted || 0
+    });
 
     // Build bot message
     const hasRedactions = data.redaction_summary?.total_redacted > 0;
@@ -1538,6 +1561,20 @@ async function handleFileUpload(file, intent) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     removeTyping(typingId);
+
+    // Track session
+    if (data.session_id) currentSessionId = data.session_id;
+    currentMessages.push({ role: 'user', text: intent || `Uploaded: ${file.name}`, redact_count: 0 });
+    currentMessages.push({
+      role: 'bot', text: null, redact_count: 0,
+      file_data: {
+        file_type: data.file_type, name: file.name,
+        summary: data.summary || {}, download_url: data.download_url,
+        original_image: data.original_image || null,
+        redacted_image: data.redacted_image || null,
+        detections: data.detections || []
+      }
+    });
 
     if (data.file_type === 'image') {
       appendImageResult(file.name, data);
@@ -1960,6 +1997,142 @@ function getSeverity(t) {
   if (critical.includes(t)) return { cls: 'sev-critical', label: 'CRITICAL' };
   if (high.includes(t)) return { cls: 'sev-high', label: 'HIGH' };
   return { cls: 'sev-medium', label: 'MEDIUM' };
+}
+const TYPE_ICONS = { chat: '💬', image: '🖼️', pdf: '📄', spreadsheet: '📊' };
+ 
+async function loadHistory() {
+  try {
+    const res = await fetch('/history');
+    const items = await res.json();
+    renderHistory(items);
+  } catch (e) {
+    document.getElementById('historyList').innerHTML =
+      '<div style="padding:8px 4px;font-size:11px;font-family:var(--font-mono);color:var(--text-dim)">Unavailable</div>';
+  }
+}
+ 
+function renderHistory(items) {
+  const list = document.getElementById('historyList');
+  if (!items || items.length === 0) {
+    list.innerHTML = '<div style="padding:8px 4px;font-size:11px;font-family:var(--font-mono);color:var(--text-dim)">No history yet</div>';
+    return;
+  }
+ 
+  // Group by display_time
+  const groups = {};
+  items.forEach(item => {
+    const g = item.display_time || 'Earlier';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(item);
+  });
+ 
+  let html = '';
+  for (const [group, entries] of Object.entries(groups)) {
+    html += `<div style="font-size:9px;font-family:var(--font-mono);color:var(--text-dim);letter-spacing:.07em;text-transform:uppercase;padding:10px 4px 3px">${group}</div>`;
+    entries.forEach(item => {
+      const icon = TYPE_ICONS[item.type] || '💬';
+      html += `
+        <div
+          class="history-item"
+          data-id="${item.session_id}"
+          title="${escHtml(item.title)}"
+          style="display:flex;align-items:center;gap:6px;justify-content:space-between;padding-right:4px"
+          onclick="restoreHistoryChat('${item.session_id}', '${escHtml(item.title)}')"
+        >
+          <span style="display:flex;align-items:center;gap:6px;overflow:hidden">
+            <span style="flex-shrink:0;font-size:11px">${icon}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis">${escHtml(item.title)}</span>
+          </span>
+          <button
+            onclick="deleteHistoryItem(event,'${item.session_id}')"
+            title="Remove"
+            style="background:none;border:none;color:var(--text-dim);font-size:11px;cursor:pointer;flex-shrink:0;padding:1px 3px;border-radius:2px;transition:color .15s;line-height:1"
+            onmouseover="this.style.color='var(--accent-red)'"
+            onmouseout="this.style.color='var(--text-dim)'"
+          >✕</button>
+        </div>
+      `;
+    });
+  }
+  list.innerHTML = html;
+}
+ 
+async function deleteHistoryItem(event, sessionId) {
+  event.stopPropagation();
+  await fetch(`/history/${sessionId}`, { method: 'DELETE' });
+  loadHistory();
+}
+ 
+async function clearAllHistory() {
+  if (!confirm('Clear all history?')) return;
+  await fetch('/history', { method: 'DELETE' });
+  loadHistory();
+}
+  
+// Load history on page ready
+document.addEventListener('DOMContentLoaded', loadHistory);
+// Also call immediately if DOMContentLoaded already fired
+if (document.readyState !== 'loading') loadHistory();
+async function saveSessionMessages() {
+  if (!currentSessionId || currentMessages.length === 0) {
+    loadHistory();
+    return;
+  }
+  try {
+    const resp = await fetch(`/history/${currentSessionId}/messages`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: currentMessages })
+    });
+    if (!resp.ok) console.warn('PUT messages failed:', resp.status);
+  } catch (e) {
+    console.warn('Could not save session:', e);
+  }
+  loadHistory();
+}
+
+async function restoreHistoryChat(sessionId, title) {
+  [...chatBody.children].forEach(c => { if (c !== chatEmpty) c.remove(); });
+  hideChatEmpty();
+  clearPanel();
+
+  document.querySelectorAll('.history-item').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.history-item[data-id="${sessionId}"]`)?.classList.add('active');
+
+  document.getElementById('topbarTitle').textContent = title;
+  currentSessionId = sessionId;
+  currentMessages = [];
+  messageCount = 1;
+
+  const loadingId = appendTyping();
+  try {
+    const res = await fetch(`/history/${sessionId}`);
+    const session = await res.json();
+    removeTyping(loadingId);
+
+    if (!session.messages || session.messages.length === 0) {
+      appendBotMessage('No messages saved for this session yet.', 0);
+      return;
+    }
+
+    currentMessages = session.messages;
+    session.messages.forEach(msg => {
+      if (msg.role === 'user') {
+        appendUserMessage(msg.text);
+      } else if (msg.role === 'bot') {
+        if (msg.file_data) {
+          const fd = msg.file_data;
+          if (fd.file_type === 'image') appendImageResult(fd.name, fd);
+          else appendFileResult(fd.name, fd);
+        } else {
+          appendBotMessage(msg.text || '', msg.redact_count || 0);
+        }
+      }
+    });
+  } catch (e) {
+    removeTyping(loadingId);
+    appendBotMessage('Could not load session history.', 0);
+  }
 }
 </script>
 </body>
